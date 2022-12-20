@@ -3,6 +3,7 @@
 import functools
 import logging
 import operator
+import os
 from typing import List, Optional, Union
 
 import hail as hl
@@ -372,6 +373,26 @@ def infer_sex_karyotype(
     return karyotype_ht
 
 
+def reuse_checkpoint(
+    name: str = "",
+    checkpoints_prefix: Optional[str] = None,
+    overwrite: bool = False,
+) -> Optional[str]:
+    """
+    Check if hail table file by the path exists and reusable, returns its path if it's
+    reusable, and None if not.
+    """
+    if checkpoints_prefix:
+        path = os.path.join(checkpoints_prefix, f"{name}.ht")
+    else:
+        path = None
+    if not overwrite and path and hl.hadoop_exists(os.path.join(path, "_SUCCESS")):
+        logger.info(f"Reusing checkpoint {path}")
+        return path
+    else:
+        return None
+
+
 def annotate_sex(
     mtds: Union[hl.MatrixTable, hl.vds.VariantDataset],
     is_sparse: bool = True,
@@ -394,6 +415,8 @@ def annotate_sex(
     compute_fstat: bool = True,
     infer_karyotype: bool = True,
     use_gaussian_mixture_model: bool = False,
+    tmp_prefix: Optional[str] = None,
+    overwrite: bool = False,
 ) -> hl.Table:
     """
     Impute sample sex based on X-chromosome heterozygosity and sex chromosome ploidy.
@@ -453,269 +476,289 @@ def annotate_sex(
     :param infer_karyotype: Whether to infer sex karyotypes. Default is True.
     :param use_gaussian_mixture_model: Whether to use gaussian mixture model to split samples into 'XX' and 'XY'
         instead of f-stat. Default is False.
+    :param tmp_prefix: If defined, write checkpoints to this location
+    :param overwrite: If a file at the checkpoint location exists, overwrite it.
     :return: Table of samples and their imputed sex karyotypes.
     """
     logger.info("Imputing sex chromosome ploidies...")
-
-    if infer_karyotype and not (compute_fstat or use_gaussian_mixture_model):
-        raise ValueError(
-            "In order to infer sex karyotype (infer_karyotype=True), one of"
-            " 'compute_fstat' or 'use_gaussian_mixture_model' must be set to True!"
-        )
-
-    is_vds = isinstance(mtds, hl.vds.VariantDataset)
-    if is_vds:
-        if excluded_intervals is not None:
-            raise NotImplementedError(
-                "The use of the parameter 'excluded_intervals' is currently not"
-                " implemented for imputing sex chromosome ploidy on a VDS!"
-            )
-        if included_intervals is None:
-            raise NotImplementedError(
-                "The current implementation for imputing sex chromosome ploidy on a VDS"
-                " requires a list of 'included_intervals'!"
-            )
-        mt = mtds.variant_data
+    if path := reuse_checkpoint("ploidy", tmp_prefix, overwrite):
+        ploidy_ht = hl.read_table(path)
     else:
-        if not is_sparse:
-            raise NotImplementedError(
-                "Imputing sex ploidy does not exist yet for dense data."
+        if infer_karyotype and not (compute_fstat or use_gaussian_mixture_model):
+            raise ValueError(
+                "In order to infer sex karyotype (infer_karyotype=True), one of"
+                " 'compute_fstat' or 'use_gaussian_mixture_model' must be set to True!"
             )
-        mt = mtds
 
-    # Determine the contigs that are needed for variant only and reference
-    # block only sex ploidy imputation
-    rg = get_reference_genome(mt.locus)
-    if normalization_contig not in rg.contigs:
-        raise ValueError(
-            f"Normalization contig {normalization_contig} is not found in reference"
-            f" genome {rg.name}!"
-        )
-
-    x_contigs = set(rg.x_contigs)
-    y_contigs = set(rg.y_contigs)
-    if variants_only_x_ploidy:
-        var_keep_contigs = x_contigs | {normalization_contig}
-        ref_keep_contigs = set()
-    else:
-        ref_keep_contigs = x_contigs | {normalization_contig}
-        var_keep_contigs = set()
-    if variants_only_y_ploidy:
-        var_keep_contigs = {normalization_contig} | var_keep_contigs | y_contigs
-    else:
-        ref_keep_contigs = {normalization_contig} | ref_keep_contigs | y_contigs
-
-    ref_keep_locus_intervals = [
-        hl.parse_locus_interval(contig, reference_genome=rg.name)
-        for contig in ref_keep_contigs
-    ]
-    var_keep_locus_intervals = [
-        hl.parse_locus_interval(contig, reference_genome=rg.name)
-        for contig in var_keep_contigs
-    ]
-    x_locus_intervals = [
-        hl.parse_locus_interval(contig, reference_genome=rg.name)
-        for contig in x_contigs
-    ]
-
-    if ref_keep_contigs:
-        logger.info(
-            "Imputing sex chromosome ploidy using only reference block depth"
-            " information on the following contigs: %s",
-            ref_keep_contigs,
-        )
+        is_vds = isinstance(mtds, hl.vds.VariantDataset)
         if is_vds:
-            if coverage_mt is not None:
-                ploidy_ht = hl.vds.impute_sex_chr_ploidy_from_interval_coverage(
-                    coverage_mt.filter_rows(
-                        hl.is_defined(included_intervals[coverage_mt.row_key])
-                        & hl.literal(ref_keep_contigs).contains(
-                            coverage_mt.interval.start.contig
-                        )
-                    ),
-                    normalization_contig=normalization_contig,
+            if excluded_intervals is not None:
+                raise NotImplementedError(
+                    "The use of the parameter 'excluded_intervals' is currently not"
+                    " implemented for imputing sex chromosome ploidy on a VDS!"
                 )
-            else:
-                ploidy_ht = hl.vds.impute_sex_chromosome_ploidy(
-                    hl.vds.filter_intervals(mtds, ref_keep_locus_intervals),
-                    calling_intervals=included_intervals,
-                    normalization_contig=normalization_contig,
-                    use_variant_dataset=False,
+            if included_intervals is None:
+                raise NotImplementedError(
+                    "The current implementation for imputing sex chromosome ploidy on a"
+                    " VDS requires a list of 'included_intervals'!"
                 )
-            ploidy_ht = ploidy_ht.rename(
-                {
-                    "x_ploidy": "chrX_ploidy",
-                    "y_ploidy": "chrY_ploidy",
-                    "x_mean_dp": "chrX_mean_dp",
-                    "y_mean_dp": "chrY_mean_dp",
-                }
-            )
+            mt = mtds.variant_data
         else:
-            ploidy_ht = impute_sex_ploidy(
-                hl.filter_intervals(mt, ref_keep_locus_intervals),
-                excluded_intervals,
-                included_intervals,
-                normalization_contig,
-                use_only_variants=False,
+            if not is_sparse:
+                raise NotImplementedError(
+                    "Imputing sex ploidy does not exist yet for dense data."
+                )
+            mt = mtds
+
+        # Determine the contigs that are needed for variant only and reference
+        # block only sex ploidy imputation
+        rg = get_reference_genome(mt.locus)
+        if normalization_contig not in rg.contigs:
+            raise ValueError(
+                f"Normalization contig {normalization_contig} is not found in reference"
+                f" genome {rg.name}!"
             )
+
+        x_contigs = set(rg.x_contigs)
+        y_contigs = set(rg.y_contigs)
         if variants_only_x_ploidy:
-            ploidy_ht = ploidy_ht.drop("chrX_ploidy", "chrX_mean_dp")
-        if variants_only_y_ploidy:
-            ploidy_ht = ploidy_ht.drop("chrY_ploidy", "chrY_mean_dp")
-
-    add_globals = hl.struct()
-    if compute_x_frac_variants_hom_alt or var_keep_contigs:
-        logger.info(
-            "Filtering variants for variant only sex chromosome ploidy imputation"
-            " and/or computation of the fraction of homozygous alternate variants on"
-            " chromosome X",
-        )
-        filtered_mt = hl.filter_intervals(
-            mt, var_keep_locus_intervals + x_locus_intervals
-        )
-        if variants_filter_lcr or variants_filter_segdup or variants_filter_decoy:
-            logger.info(
-                "Filtering out variants in: %s",
-                ("segmental duplications, " if variants_filter_segdup else "")
-                + ("low confidence regions, " if variants_filter_lcr else "")
-                + (" decoy regions" if variants_filter_decoy else ""),
-            )
-            filtered_mt = filter_low_conf_regions(
-                filtered_mt,
-                filter_lcr=variants_filter_lcr,
-                filter_decoy=variants_filter_decoy,
-                filter_segdup=variants_filter_segdup,
-            )
-        if variants_snv_only:
-            logger.info("Filtering to SNVs")
-            filtered_mt = filtered_mt.filter_rows(
-                hl.is_snp(filtered_mt.alleles[0], filtered_mt.alleles[1])
-            )
-
-        add_globals = add_globals.annotate(
-            variants_filter_lcr=variants_filter_lcr,
-            variants_segdup=variants_filter_segdup,
-            variants_filter_decoy=variants_filter_decoy,
-            variants_snv_only=variants_snv_only,
-        )
-
-    if var_keep_contigs:
-        logger.info(
-            "Imputing sex chromosome ploidy using only variant depth information on the"
-            " following contigs: %s",
-            var_keep_contigs,
-        )
-        var_filtered_mt = hl.filter_intervals(filtered_mt, var_keep_locus_intervals)
-        if is_vds:
-            var_ploidy_ht = hl.vds.impute_sex_chromosome_ploidy(
-                hl.vds.VariantDataset(mtds.reference_data, var_filtered_mt),
-                calling_intervals=included_intervals,
-                normalization_contig=normalization_contig,
-                use_variant_dataset=True,
-            )
-            var_ploidy_ht = var_ploidy_ht.rename(
-                {
-                    "autosomal_mean_dp": f"var_data_{normalization_contig}_mean_dp",
-                    "x_ploidy": "chrX_ploidy",
-                    "y_ploidy": "chrY_ploidy",
-                    "x_mean_dp": "chrX_mean_dp",
-                    "y_mean_dp": "chrY_mean_dp",
-                }
-            )
+            var_keep_contigs = x_contigs | {normalization_contig}
+            ref_keep_contigs = set()
         else:
-            var_ploidy_ht = impute_sex_ploidy(
-                var_filtered_mt,
-                excluded_intervals,
-                included_intervals,
-                normalization_contig,
-                use_only_variants=True,
-            )
-            var_ploidy_ht = var_ploidy_ht.rename(
-                {
-                    f"{normalization_contig}_mean_dp": (
-                        f"var_data_{normalization_contig}_mean_dp"
-                    )
-                }
-            )
+            ref_keep_contigs = x_contigs | {normalization_contig}
+            var_keep_contigs = set()
+        if variants_only_y_ploidy:
+            var_keep_contigs = {normalization_contig} | var_keep_contigs | y_contigs
+        else:
+            ref_keep_contigs = {normalization_contig} | ref_keep_contigs | y_contigs
+
+        ref_keep_locus_intervals = [
+            hl.parse_locus_interval(contig, reference_genome=rg.name)
+            for contig in ref_keep_contigs
+        ]
+        var_keep_locus_intervals = [
+            hl.parse_locus_interval(contig, reference_genome=rg.name)
+            for contig in var_keep_contigs
+        ]
+        x_locus_intervals = [
+            hl.parse_locus_interval(contig, reference_genome=rg.name)
+            for contig in x_contigs
+        ]
 
         if ref_keep_contigs:
-            ploidy_ht = var_ploidy_ht.annotate(**ploidy_ht[var_ploidy_ht.key])
-        else:
-            ploidy_ht = var_ploidy_ht
+            logger.info(
+                "Imputing sex chromosome ploidy using only reference block depth"
+                " information on the following contigs: %s",
+                ref_keep_contigs,
+            )
+            if is_vds:
+                if coverage_mt is not None:
+                    ploidy_ht = hl.vds.impute_sex_chr_ploidy_from_interval_coverage(
+                        coverage_mt.filter_rows(
+                            hl.is_defined(included_intervals[coverage_mt.row_key])
+                            & hl.literal(ref_keep_contigs).contains(
+                                coverage_mt.interval.start.contig
+                            )
+                        ),
+                        normalization_contig=normalization_contig,
+                    )
+                else:
+                    ploidy_ht = hl.vds.impute_sex_chromosome_ploidy(
+                        hl.vds.filter_intervals(mtds, ref_keep_locus_intervals),
+                        calling_intervals=included_intervals,
+                        normalization_contig=normalization_contig,
+                        use_variant_dataset=False,
+                    )
+                ploidy_ht = ploidy_ht.rename(
+                    {
+                        "x_ploidy": "chrX_ploidy",
+                        "y_ploidy": "chrY_ploidy",
+                        "x_mean_dp": "chrX_mean_dp",
+                        "y_mean_dp": "chrY_mean_dp",
+                    }
+                )
+            else:
+                ploidy_ht = impute_sex_ploidy(
+                    hl.filter_intervals(mt, ref_keep_locus_intervals),
+                    excluded_intervals,
+                    included_intervals,
+                    normalization_contig,
+                    use_only_variants=False,
+                )
+            if variants_only_x_ploidy:
+                ploidy_ht = ploidy_ht.drop("chrX_ploidy", "chrX_mean_dp")
+            if variants_only_y_ploidy:
+                ploidy_ht = ploidy_ht.drop("chrY_ploidy", "chrY_mean_dp")
 
-    ploidy_ht = ploidy_ht.annotate_globals(
-        normalization_contig=normalization_contig,
-        variants_only_x_ploidy=variants_only_x_ploidy,
-        variants_only_y_ploidy=variants_only_y_ploidy,
-        **add_globals,
-    )
+        add_globals = hl.struct()
+        if compute_x_frac_variants_hom_alt or var_keep_contigs:
+            logger.info(
+                "Filtering variants for variant only sex chromosome ploidy imputation"
+                " and/or computation of the fraction of homozygous alternate variants"
+                " on chromosome X",
+            )
+            filtered_mt = hl.filter_intervals(
+                mt, var_keep_locus_intervals + x_locus_intervals
+            )
+            if variants_filter_lcr or variants_filter_segdup or variants_filter_decoy:
+                logger.info(
+                    "Filtering out variants in: %s",
+                    ("segmental duplications, " if variants_filter_segdup else "")
+                    + ("low confidence regions, " if variants_filter_lcr else "")
+                    + (" decoy regions" if variants_filter_decoy else ""),
+                )
+                filtered_mt = filter_low_conf_regions(
+                    filtered_mt,
+                    filter_lcr=variants_filter_lcr,
+                    filter_decoy=variants_filter_decoy,
+                    filter_segdup=variants_filter_segdup,
+                )
+            if variants_snv_only:
+                logger.info("Filtering to SNVs")
+                filtered_mt = filtered_mt.filter_rows(
+                    hl.is_snp(filtered_mt.alleles[0], filtered_mt.alleles[1])
+                )
+
+            add_globals = add_globals.annotate(
+                variants_filter_lcr=variants_filter_lcr,
+                variants_segdup=variants_filter_segdup,
+                variants_filter_decoy=variants_filter_decoy,
+                variants_snv_only=variants_snv_only,
+            )
+
+        if var_keep_contigs:
+            logger.info(
+                "Imputing sex chromosome ploidy using only variant depth information on"
+                " the following contigs: %s",
+                var_keep_contigs,
+            )
+            var_filtered_mt = hl.filter_intervals(filtered_mt, var_keep_locus_intervals)
+            if is_vds:
+                var_ploidy_ht = hl.vds.impute_sex_chromosome_ploidy(
+                    hl.vds.VariantDataset(mtds.reference_data, var_filtered_mt),
+                    calling_intervals=included_intervals,
+                    normalization_contig=normalization_contig,
+                    use_variant_dataset=True,
+                )
+                var_ploidy_ht = var_ploidy_ht.rename(
+                    {
+                        "autosomal_mean_dp": f"var_data_{normalization_contig}_mean_dp",
+                        "x_ploidy": "chrX_ploidy",
+                        "y_ploidy": "chrY_ploidy",
+                        "x_mean_dp": "chrX_mean_dp",
+                        "y_mean_dp": "chrY_mean_dp",
+                    }
+                )
+            else:
+                var_ploidy_ht = impute_sex_ploidy(
+                    var_filtered_mt,
+                    excluded_intervals,
+                    included_intervals,
+                    normalization_contig,
+                    use_only_variants=True,
+                )
+                var_ploidy_ht = var_ploidy_ht.rename(
+                    {
+                        f"{normalization_contig}_mean_dp": (
+                            f"var_data_{normalization_contig}_mean_dp"
+                        )
+                    }
+                )
+
+            if ref_keep_contigs:
+                ploidy_ht = var_ploidy_ht.annotate(**ploidy_ht[var_ploidy_ht.key])
+            else:
+                ploidy_ht = var_ploidy_ht
+
+        ploidy_ht = ploidy_ht.annotate_globals(
+            normalization_contig=normalization_contig,
+            variants_only_x_ploidy=variants_only_x_ploidy,
+            variants_only_y_ploidy=variants_only_y_ploidy,
+            **add_globals,
+        )
+        ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
 
     if compute_x_frac_variants_hom_alt:
         logger.info(
             "Computing fraction of variants that are homozygous alternate on"
             " chromosome X"
         )
-        filtered_mt = hl.filter_intervals(filtered_mt, x_locus_intervals)
-        filtered_mt = filtered_mt.filter_rows(
-            hl.is_defined(included_intervals[filtered_mt.locus])
-        )
-        filtered_mt = filtered_mt.annotate_entries(
-            adj=get_adj_expr(
-                filtered_mt.LGT, filtered_mt.GQ, filtered_mt.DP, filtered_mt.LAD
+        if path := reuse_checkpoint(
+            "compute_x_frac_variants_hom_alt", tmp_prefix, overwrite
+        ):
+            ploidy_ht = hl.read_table(path)
+        else:
+            filtered_mt = hl.filter_intervals(filtered_mt, x_locus_intervals)
+            filtered_mt = filtered_mt.filter_rows(
+                hl.is_defined(included_intervals[filtered_mt.locus])
             )
-        )
-        frac_hom_alt_ht = filtered_mt.select_cols(
-            chrx_frac_hom_alt=hl.agg.count_where(filtered_mt.LGT.is_hom_var())
-            / hl.agg.count_where(hl.is_defined(filtered_mt.LGT)),
-            chrx_frac_hom_alt_adj=hl.agg.filter(
-                filtered_mt.adj,
-                hl.agg.count_where(filtered_mt.LGT.is_hom_var())
+            filtered_mt = filtered_mt.annotate_entries(
+                adj=get_adj_expr(
+                    filtered_mt.LGT, filtered_mt.GQ, filtered_mt.DP, filtered_mt.LAD
+                )
+            )
+            frac_hom_alt_ht = filtered_mt.select_cols(
+                chrx_frac_hom_alt=hl.agg.count_where(filtered_mt.LGT.is_hom_var())
                 / hl.agg.count_where(hl.is_defined(filtered_mt.LGT)),
-            ),
-        ).cols()
-        ploidy_ht = ploidy_ht.annotate(**frac_hom_alt_ht[ploidy_ht.key])
+                chrx_frac_hom_alt_adj=hl.agg.filter(
+                    filtered_mt.adj,
+                    hl.agg.count_where(filtered_mt.LGT.is_hom_var())
+                    / hl.agg.count_where(hl.is_defined(filtered_mt.LGT)),
+                ),
+            ).cols()
+            ploidy_ht = ploidy_ht.annotate(**frac_hom_alt_ht[ploidy_ht.key])
+            ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
 
     if compute_fstat:
         logger.info("Filtering mt to biallelic SNPs in X contigs: %s", x_contigs)
-        if "was_split" in list(mt.row):
-            mt = mt.filter_rows(
-                (~mt.was_split) & hl.is_snp(mt.alleles[0], mt.alleles[1])
-            )
+        if path := reuse_checkpoint("compute_fstat", tmp_prefix, overwrite):
+            ploidy_ht = hl.read_table(path)
         else:
-            mt = mt.filter_rows(
-                (hl.len(mt.alleles) == 2) & hl.is_snp(mt.alleles[0], mt.alleles[1])
+            if "was_split" in list(mt.row):
+                mt = mt.filter_rows(
+                    (~mt.was_split) & hl.is_snp(mt.alleles[0], mt.alleles[1])
+                )
+            else:
+                mt = mt.filter_rows(
+                    (hl.len(mt.alleles) == 2) & hl.is_snp(mt.alleles[0], mt.alleles[1])
+                )
+
+            mt = hl.filter_intervals(mt, x_locus_intervals)
+            if sites_ht is not None:
+                if aaf_expr is None:
+                    logger.warning(
+                        "sites_ht was provided, but aaf_expr is missing. Assuming name"
+                        " of field with alternate allele frequency is 'AF'."
+                    )
+                    aaf_expr = "AF"
+                logger.info("Filtering to provided sites")
+                mt = mt.annotate_rows(**sites_ht[mt.row_key])
+                mt = mt.filter_rows(hl.is_defined(mt[aaf_expr]))
+
+            logger.info("Calculating inbreeding coefficient on chrX")
+            sex_ht = hl.impute_sex(
+                mt[gt_expr],
+                aaf_threshold=aaf_threshold,
+                male_threshold=f_stat_cutoff,
+                female_threshold=f_stat_cutoff,
+                aaf=aaf_expr,
             )
 
-        mt = hl.filter_intervals(mt, x_locus_intervals)
-        if sites_ht is not None:
-            if aaf_expr is None:
-                logger.warning(
-                    "sites_ht was provided, but aaf_expr is missing. Assuming name of"
-                    " field with alternate allele frequency is 'AF'."
-                )
-                aaf_expr = "AF"
-            logger.info("Filtering to provided sites")
-            mt = mt.annotate_rows(**sites_ht[mt.row_key])
-            mt = mt.filter_rows(hl.is_defined(mt[aaf_expr]))
-
-        logger.info("Calculating inbreeding coefficient on chrX")
-        sex_ht = hl.impute_sex(
-            mt[gt_expr],
-            aaf_threshold=aaf_threshold,
-            male_threshold=f_stat_cutoff,
-            female_threshold=f_stat_cutoff,
-            aaf=aaf_expr,
-        )
-
-        logger.info("Annotating sex chromosome ploidy HT with impute_sex HT")
-        ploidy_ht = ploidy_ht.annotate(**sex_ht[ploidy_ht.key])
-        ploidy_ht = ploidy_ht.annotate_globals(f_stat_cutoff=f_stat_cutoff)
+            logger.info("Annotating sex chromosome ploidy HT with impute_sex HT")
+            ploidy_ht = ploidy_ht.annotate(**sex_ht[ploidy_ht.key])
+            ploidy_ht = ploidy_ht.annotate_globals(f_stat_cutoff=f_stat_cutoff)
+            ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
 
     if infer_karyotype:
-        karyotype_ht = infer_sex_karyotype(
-            ploidy_ht, f_stat_cutoff, use_gaussian_mixture_model
-        )
-        ploidy_ht = ploidy_ht.annotate(**karyotype_ht[ploidy_ht.key])
-        ploidy_ht = ploidy_ht.annotate_globals(**karyotype_ht.index_globals())
+        logger.info("infer_karyotype")
+        if path := reuse_checkpoint("infer_karyotype", tmp_prefix, overwrite):
+            ploidy_ht = hl.read_table(path)
+        else:
+            karyotype_ht = infer_sex_karyotype(
+                ploidy_ht, f_stat_cutoff, use_gaussian_mixture_model
+            )
+            ploidy_ht = ploidy_ht.annotate(**karyotype_ht[ploidy_ht.key])
+            ploidy_ht = ploidy_ht.annotate_globals(**karyotype_ht.index_globals())
+            ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
 
     return ploidy_ht
