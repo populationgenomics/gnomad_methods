@@ -374,7 +374,7 @@ def infer_sex_karyotype(
     return karyotype_ht
 
 
-def can_reuse_ht(fname: str, overwrite: bool = False) -> bool:
+def can_reuse_ht(path: str, overwrite: bool = False) -> bool:
     """
     Check if a file at `path` exists and can be reused.
     """
