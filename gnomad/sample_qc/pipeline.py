@@ -22,6 +22,7 @@ from gnomad.utils.annotations import (
 from gnomad.utils.filtering import filter_low_conf_regions, filter_to_adj
 from gnomad.utils.reference_genome import get_reference_genome
 from gnomad.utils.sparse_mt import impute_sex_ploidy
+from gnomad.utils.file_utils import file_exists
 
 logging.basicConfig(format="%(levelname)s (%(name)s %(lineno)s): %(message)s")
 logger = logging.getLogger(__name__)
@@ -373,16 +374,13 @@ def infer_sex_karyotype(
     return karyotype_ht
 
 
-def can_reuse_ht(
-    path: str,
-    overwrite: bool = False,
-) -> bool:
+def can_reuse_ht(fname: str, overwrite: bool = False) -> bool:
     """
-    Check if a Hail Table checkpoint at `path` exists and can be reused.
+    Check if a file at `path` exists and can be reused.
     """
     if overwrite:
         return False
-    if hl.hadoop_exists(os.path.join(path, "_SUCCESS")):
+    if file_exists(path):
         logger.info(f"Reusing checkpoint {path}")
         return True
     return False
@@ -390,7 +388,7 @@ def can_reuse_ht(
 
 T = TypeVar("T", str, None)
 
-def checkpoint_path(tmp_prefix: T, name: str) ->T:
+def checkpoint_path(tmp_prefix: T, name: str) -> T:
     """
     Path to save and read checkpoints.
     """
