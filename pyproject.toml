@@ -1,11 +1,15 @@
 [tool.black]
 target-version = ['py39', 'py310', 'py311']
 preview = true
+# [CPG-LOCAL] Avoid spurious reformatting in local patches
+exclude = 'gnomad/sample_qc/pipeline.py'
 [tool.isort]
 profile = "black"
 [tool.autopep8]
 # Use same max line length as the default in Black - 88
 max_line_length = 88
+# [CPG-LOCAL] Avoid spurious reformatting in local patches
+exclude = 'gnomad/sample_qc/pipeline.py'
 # Ignore errors that conflict with Black
 # E201 - whitespace after ‘(‘
 # E202 - whitespace before ‘)’
