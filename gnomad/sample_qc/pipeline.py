@@ -373,22 +373,29 @@ def infer_sex_karyotype(
     return karyotype_ht
 
 
-def reuse_checkpoint(
-    name: str = "",
-    checkpoints_prefix: Optional[str] = None,
+def can_reuse_ht(
+    path: str,
     overwrite: bool = False,
-) -> Optional[str]:
+) -> bool:
     """
-    Check if hail table file by the path exists and reusable, returns its path if it's
-    reusable, and None if not.
+    Check if a Hail Table checkpoint at `path` exists and can be reused.
     """
-    if checkpoints_prefix:
-        path = os.path.join(checkpoints_prefix, f"{name}.ht")
-    else:
-        path = None
-    if not overwrite and path and hl.hadoop_exists(os.path.join(path, "_SUCCESS")):
+    if overwrite:
+        return False
+    if hl.hadoop_exists(os.path.join(path, "_SUCCESS")):
         logger.info(f"Reusing checkpoint {path}")
-        return path
+        return True
+    return False
+
+
+T = TypeVar("T", str, None)
+
+def checkpoint_path(tmp_prefix: T, name: str) ->T:
+    """
+    Path to save and read checkpoints.
+    """
+    if tmp_prefix:
+        return os.path.join(tmp_prefix, f"{name}.ht")
     else:
         return None
 
@@ -481,7 +488,7 @@ def annotate_sex(
     :return: Table of samples and their imputed sex karyotypes.
     """
     logger.info("Imputing sex chromosome ploidies...")
-    if path := reuse_checkpoint("ploidy", tmp_prefix, overwrite):
+    if (path := checkpoint_path(tmp_prefix, "ploidy.ht")) and can_reuse_ht(path, overwrite):
         ploidy_ht = hl.read_table(path)
     else:
         if infer_karyotype and not (compute_fstat or use_gaussian_mixture_model):
@@ -676,16 +683,15 @@ def annotate_sex(
             variants_only_y_ploidy=variants_only_y_ploidy,
             **add_globals,
         )
-        ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
+        if path:
+            ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
 
     if compute_x_frac_variants_hom_alt:
         logger.info(
             "Computing fraction of variants that are homozygous alternate on"
             " chromosome X"
         )
-        if path := reuse_checkpoint(
-            "compute_x_frac_variants_hom_alt", tmp_prefix, overwrite
-        ):
+        if (path := checkpoint_path(tmp_prefix, "compute_x_frac_variants_hom_alt.ht")) and can_reuse_ht(path, overwrite):
             ploidy_ht = hl.read_table(path)
         else:
             filtered_mt = hl.filter_intervals(filtered_mt, x_locus_intervals)
@@ -707,11 +713,12 @@ def annotate_sex(
                 ),
             ).cols()
             ploidy_ht = ploidy_ht.annotate(**frac_hom_alt_ht[ploidy_ht.key])
-            ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
+            if path:
+                ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
 
     if compute_fstat:
         logger.info("Filtering mt to biallelic SNPs in X contigs: %s", x_contigs)
-        if path := reuse_checkpoint("compute_fstat", tmp_prefix, overwrite):
+        if (path := checkpoint_path(tmp_prefix, "compute_fstat.ht")) and can_reuse_ht(path, overwrite):
             ploidy_ht = hl.read_table(path)
         else:
             if "was_split" in list(mt.row):
@@ -747,11 +754,12 @@ def annotate_sex(
             logger.info("Annotating sex chromosome ploidy HT with impute_sex HT")
             ploidy_ht = ploidy_ht.annotate(**sex_ht[ploidy_ht.key])
             ploidy_ht = ploidy_ht.annotate_globals(f_stat_cutoff=f_stat_cutoff)
-            ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
+            if path:
+                ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
 
     if infer_karyotype:
         logger.info("infer_karyotype")
-        if path := reuse_checkpoint("infer_karyotype", tmp_prefix, overwrite):
+        if (path := checkpoint_path(tmp_prefix, "infer_karyotype.ht")) and can_reuse_ht(path, overwrite):
             ploidy_ht = hl.read_table(path)
         else:
             karyotype_ht = infer_sex_karyotype(
@@ -759,6 +767,7 @@ def annotate_sex(
             )
             ploidy_ht = ploidy_ht.annotate(**karyotype_ht[ploidy_ht.key])
             ploidy_ht = ploidy_ht.annotate_globals(**karyotype_ht.index_globals())
-            ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
+            if path:
+                ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
 
     return ploidy_ht
