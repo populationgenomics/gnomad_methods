@@ -4,7 +4,7 @@ import functools
 import logging
 import operator
 import os
-from typing import List, Optional, Union
+from typing import List, Optional, Union, TypeVar
 
 import hail as hl
 
