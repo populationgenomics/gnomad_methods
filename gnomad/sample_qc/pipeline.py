@@ -394,6 +394,7 @@ def can_reuse(path: str, overwrite: bool = False) -> bool:
 
 T = TypeVar("T", str, None)
 
+
 def checkpoint_path(tmp_prefix: T, name: str) -> T:
     """
     Path to save and read checkpoints.
@@ -492,7 +493,9 @@ def annotate_sex(
     :return: Table of samples and their imputed sex karyotypes.
     """
     logger.info("Imputing sex chromosome ploidies...")
-    if (path := checkpoint_path(tmp_prefix, "ploidy.ht")) and can_reuse(path, overwrite):
+    if (path := checkpoint_path(tmp_prefix, "ploidy.ht")) and can_reuse(
+        path, overwrite
+    ):
         ploidy_ht = hl.read_table(path)
     else:
         if infer_karyotype and not (compute_fstat or use_gaussian_mixture_model):
@@ -695,7 +698,9 @@ def annotate_sex(
             "Computing fraction of variants that are homozygous alternate on"
             " chromosome X"
         )
-        if (path := checkpoint_path(tmp_prefix, "compute_x_frac_variants_hom_alt.ht")) and can_reuse(path, overwrite):
+        if (
+            path := checkpoint_path(tmp_prefix, "compute_x_frac_variants_hom_alt.ht")
+        ) and can_reuse(path, overwrite):
             ploidy_ht = hl.read_table(path)
         else:
             filtered_mt = hl.filter_intervals(filtered_mt, x_locus_intervals)
@@ -722,7 +727,9 @@ def annotate_sex(
 
     if compute_fstat:
         logger.info("Filtering mt to biallelic SNPs in X contigs: %s", x_contigs)
-        if (path := checkpoint_path(tmp_prefix, "compute_fstat.ht")) and can_reuse(path, overwrite):
+        if (path := checkpoint_path(tmp_prefix, "compute_fstat.ht")) and can_reuse(
+            path, overwrite
+        ):
             ploidy_ht = hl.read_table(path)
         else:
             if "was_split" in list(mt.row):
@@ -763,7 +770,9 @@ def annotate_sex(
 
     if infer_karyotype:
         logger.info("infer_karyotype")
-        if (path := checkpoint_path(tmp_prefix, "infer_karyotype.ht")) and can_reuse(path, overwrite):
+        if (path := checkpoint_path(tmp_prefix, "infer_karyotype.ht")) and can_reuse(
+            path, overwrite
+        ):
             ploidy_ht = hl.read_table(path)
         else:
             karyotype_ht = infer_sex_karyotype(
