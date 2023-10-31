@@ -1,6 +1,12 @@
+annoy
+ga4gh.vrs[extras]==0.8.4
 hail
 hdbscan
 ipywidgets
 networkx
+onnx
+onnxruntime
 scikit-learn
+skl2onnx
 slackclient==2.5.0
+statsmodels

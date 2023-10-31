@@ -1,9 +1,11 @@
 """Script containing generic constraint functions that may be used in the constraint pipeline."""
 
+import copy
 import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import hail as hl
+from hail.utils.misc import divide_null, new_temp_file
 
 from gnomad.utils.vep import explode_by_vep_annotation, process_consequences
 
@@ -14,7 +16,7 @@ logging.basicConfig(
 logger = logging.getLogger("constraint_utils")
 logger.setLevel(logging.INFO)
 
-COVERAGE_CUTOFF = 40
+COVERAGE_CUTOFF = 30
 """
 Minimum median exome coverage differentiating high coverage sites from low coverage sites.
 
@@ -224,6 +226,31 @@ def count_variants_by_group(
         )
 
 
+def get_downsampling_freq_indices(
+    freq_meta_expr: hl.expr.ArrayExpression,
+    pop: str = "global",
+    variant_quality: str = "adj",
+) -> hl.expr.ArrayExpression:
+    """
+    Get indices of dictionaries in meta dictionaries that only have the "downsampling" key with specified "pop" and "variant_quality" values.
+
+    :param freq_meta_expr: ArrayExpression containing the set of groupings for each
+        element of the `freq_expr` array (e.g., [{'group': 'adj'}, {'group': 'adj',
+        'pop': 'nfe'}, {'downsampling': '5000', 'group': 'adj', 'pop': 'global'}]).
+    :param pop: Population to use for filtering by the 'pop' key in `freq_meta_expr`.
+        Default is 'global'.
+    :param variant_quality: Variant quality to use for filtering by the 'group' key in
+        `freq_meta_expr`. Default is 'adj'.
+    """
+    indices = hl.enumerate(freq_meta_expr).filter(
+        lambda f: (f[1].get("group") == variant_quality)
+        & (f[1].get("pop") == pop)
+        & f[1].contains("downsampling")
+    )
+    # Get an array of indices and meta dictionaries sorted by "downsampling" key.
+    return hl.sorted(indices, key=lambda f: hl.int(f[1]["downsampling"]))
+
+
 def downsampling_counts_expr(
     freq_expr: hl.expr.ArrayExpression,
     freq_meta_expr: hl.expr.ArrayExpression,
@@ -255,18 +282,10 @@ def downsampling_counts_expr(
     :return: Aggregation Expression for an array of the variant counts in downsamplings
         for specified population.
     """
-    # Get indices of dictionaries in meta dictionaries that only have the
-    # "downsampling" key with specified "group" and "pop" values.
-    indices = hl.enumerate(freq_meta_expr).filter(
-        lambda f: (f[1].size() == 3)
-        & (f[1].get("group") == variant_quality)
-        & (f[1].get("pop") == pop)
-        & f[1].contains("downsampling")
-    )
     # Get an array of indices sorted by "downsampling" key.
-    sorted_indices = hl.sorted(indices, key=lambda f: hl.int(f[1]["downsampling"])).map(
-        lambda x: x[0]
-    )
+    sorted_indices = get_downsampling_freq_indices(
+        freq_meta_expr, pop, variant_quality
+    ).map(lambda x: x[0])
 
     def _get_criteria(i: hl.expr.Int32Expression) -> hl.expr.Int32Expression:
         """
@@ -293,7 +312,9 @@ def downsampling_counts_expr(
 
 
 def annotate_mutation_type(
-    t: Union[hl.MatrixTable, hl.Table]
+    t: Union[hl.MatrixTable, hl.Table],
+    context_length: Optional[int] = None,
+    num_scan_context_length: Optional[int] = 100,
 ) -> Union[hl.MatrixTable, hl.Table]:
     """
     Annotate mutation types.
@@ -310,20 +331,36 @@ def annotate_mutation_type(
         used in this repo to indicate a variant's multiallelic and SNP/indel status.
 
     :param t: Input Table or MatrixTable.
+    :param context_length: Length of the 'context' annotation in 't'. If this is not
+        specified, the value will be determined by examining the first
+        `num_scan_context_length` values of the 'context' annotation. Default is None.
+    :param num_scan_context_length: Number of values in the 'context' annotation to use
+        for determining `context_length` if it is not specified. If set to None, all
+        values in 'context' will be used. Default is 100.
     :return: Table with mutation type annotations added.
     """
-    # Determine the context length by collecting all the context lengths.
-    context_lengths = list(
-        filter(None, t.aggregate(hl.agg.collect_as_set(hl.len(t.context))))
-    )
-    if len(context_lengths) > 1:
-        raise ValueError(
-            "More than one length was found among the first 100 'context' values."
-            " Length of 'context' should be consistent."
-        )
-    else:
-        context_length = context_lengths[0]
-        logger.info("Detected a length of %d for context length", context_length)
+    if context_length is None:
+        # Determine the context length by collecting all the context lengths.
+        if num_scan_context_length is None:
+            context_lengths = t.aggregate(hl.agg.collect_as_set(hl.len(t.context)))
+            msg = "all"
+        else:
+            context_lengths = hl.len(t.context).take(num_scan_context_length)
+            msg = f"the first {num_scan_context_length}"
+        context_lengths = list(filter(None, set(context_lengths)))
+        if len(context_lengths) > 1:
+            raise ValueError(
+                f"More than one length was found among {msg} 'context' values. Length "
+                "of 'context' should be consistent.",
+            )
+        else:
+            context_length = context_lengths[0]
+            logger.info(
+                "Detected a length of %d for context length using %s 'context' values.",
+                context_length,
+                msg,
+            )
+
     # Determine the middle index of the context annotation.
     if context_length == 3:
         mid_index = 1
@@ -348,10 +385,15 @@ def annotate_mutation_type(
     else:
         t = t.annotate(transition=transition_expr, cpg=cpg_expr)
     mutation_type_expr = (
-        hl.case()
-        .when(t.cpg, "CpG")
-        .when(t.transition, "non-CpG transition")
-        .default("transversion")
+        hl.switch(hl.len(t.context))
+        .when(
+            context_length,
+            hl.case()
+            .when(t.cpg, "CpG")
+            .when(t.transition, "non-CpG transition")
+            .default("transversion"),
+        )
+        .or_error("Found 'context' value with unexpected context length!")
     )
     mutation_type_model_expr = hl.if_else(t.cpg, t.context, "non-CpG")
     if isinstance(t, hl.MatrixTable):
@@ -429,8 +471,10 @@ def build_models(
         "methylation_level",
         "mu_snp",
     ),
-    cov_cutoff: int = COVERAGE_CUTOFF,
-) -> Tuple[Tuple[float, float], hl.expr.StructExpression]:
+    high_cov_definition: int = COVERAGE_CUTOFF,
+    upper_cov_cutoff: Optional[int] = None,
+    skip_coverage_model: bool = False,
+) -> Tuple[Optional[Tuple[float, float]], hl.expr.StructExpression]:
     """
     Build coverage and plateau models.
 
@@ -442,7 +486,7 @@ def build_models(
     sites (transversions and non CpG transitions).
 
     The plateau models only consider high coverage sites, or sites above a median
-    coverage of `cov_cutoff`.
+    coverage of `high_cov_definition` and median coverage below `upper_cov_cutoff`.
 
     Plateau model: adjusts proportion of expected variation based on location in the
     genome and CpG status.
@@ -451,14 +495,14 @@ def build_models(
     - y: proportion observed ('observed_variants' or 'observed_{pop}' / 'possible_variants')
 
     This function also builds models (coverage models) to calibrate the proportion of
-    expected variation at low coverage sites (sites below `cov_cutoff`).
+    expected variation at low coverage sites (sites below `high_cov_definition`).
 
     The coverage models are built by creating a scaling factor across all high coverage
     sites, applying this ratio to the low coverage sites, and running a linear
     regression.
 
     Coverage model: corrects proportion of expected variation at low coverage sites.
-    Low coverage sites are defined as sites with median coverage < `cov_cutoff`.
+    Low coverage sites are defined as sites with median coverage < `high_cov_definition`.
 
     The x and y of the coverage model:
     - x: log10 groupings of exome coverage at low coverage sites
@@ -497,12 +541,21 @@ def build_models(
         Default is ().
     :param keys: Annotations used to group observed and possible variant counts.
         Default is ("context", "ref", "alt", "methylation_level", "mu_snp").
-    :param cov_cutoff: Median coverage cutoff. Sites with coverage above this cutoff
+    :param high_cov_definition: Lower median coverage cutoff. Sites with coverage above this cutoff
         are considered well covered. Default is `COVERAGE_CUTOFF`.
+    :param upper_cov_cutoff: Upper median coverage cutoff. Sites with coverage above this cutoff
+        are excluded from the high coverage Table. Default is None.
+    :param skip_coverage_model: Whether to skip generating the coverage model. If set to True,
+        None is returned instead of the coverage model. Default is False.
     :return: Coverage model and plateau models.
     """
-    # Filter to sites with coverage above `cov_cutoff`.
-    high_cov_ht = coverage_ht.filter(coverage_ht.exome_coverage >= cov_cutoff)
+    # Filter to sites with coverage equal to or above `high_cov_definition`.
+    high_cov_ht = coverage_ht.filter(coverage_ht.exome_coverage >= high_cov_definition)
+
+    # Filter to sites with coverage equal to or below `upper_cov_cutoff` if specified.
+    if upper_cov_cutoff is not None:
+        high_cov_ht = high_cov_ht.filter(high_cov_ht.exome_coverage <= upper_cov_cutoff)
+
     agg_expr = {
         "observed_variants": hl.agg.sum(high_cov_ht.observed_variants),
         "possible_variants": hl.agg.sum(high_cov_ht.possible_variants),
@@ -544,38 +597,43 @@ def build_models(
             hl.struct(**plateau_models_agg_expr)
         )
 
-    # Filter to sites with coverage below `cov_cutoff` and larger than 0.
-    low_cov_ht = coverage_ht.filter(
-        (coverage_ht.exome_coverage < cov_cutoff) & (coverage_ht.exome_coverage > 0)
-    )
-
-    # Create a metric that represents the relative mutability of the exome calculated
-    # on high coverage sites and will be used as scaling factor when building the
-    # coverage model.
-    high_coverage_scale_factor = high_cov_ht.aggregate(
-        hl.agg.sum(high_cov_ht.observed_variants)
-        / hl.agg.sum(high_cov_ht.possible_variants * high_cov_ht.mu_snp)
-    )
-
-    # Generate a Table with all necessary annotations (x and y listed above)
-    # for the coverage model.
-    low_cov_group_ht = low_cov_ht.group_by(
-        log_coverage=hl.log10(low_cov_ht.exome_coverage)
-    ).aggregate(
-        low_coverage_oe=hl.agg.sum(low_cov_ht.observed_variants)
-        / (
-            high_coverage_scale_factor
-            * hl.agg.sum(low_cov_ht.possible_variants * low_cov_ht.mu_snp)
+    if not skip_coverage_model:
+        # Filter to sites with coverage below `high_cov_definition` and larger than 0.
+        low_cov_ht = coverage_ht.filter(
+            (coverage_ht.exome_coverage < high_cov_definition)
+            & (coverage_ht.exome_coverage > 0)
         )
-    )
 
-    # Build the coverage model.
-    # TODO: consider weighting here as well
-    coverage_model_expr = build_coverage_model(
-        low_coverage_oe_expr=low_cov_group_ht.low_coverage_oe,
-        log_coverage_expr=low_cov_group_ht.log_coverage,
-    )
-    coverage_model = tuple(low_cov_group_ht.aggregate(coverage_model_expr).beta)
+        # Create a metric that represents the relative mutability of the exome calculated
+        # on high coverage sites and will be used as scaling factor when building the
+        # coverage model.
+        high_coverage_scale_factor = high_cov_ht.aggregate(
+            hl.agg.sum(high_cov_ht.observed_variants)
+            / hl.agg.sum(high_cov_ht.possible_variants * high_cov_ht.mu_snp)
+        )
+
+        # Generate a Table with all necessary annotations (x and y listed above)
+        # for the coverage model.
+        low_cov_group_ht = low_cov_ht.group_by(
+            log_coverage=hl.log10(low_cov_ht.exome_coverage)
+        ).aggregate(
+            low_coverage_oe=hl.agg.sum(low_cov_ht.observed_variants)
+            / (
+                high_coverage_scale_factor
+                * hl.agg.sum(low_cov_ht.possible_variants * low_cov_ht.mu_snp)
+            )
+        )
+
+        # Build the coverage model.
+        # TODO: consider weighting here as well
+        coverage_model_expr = build_coverage_model(
+            low_coverage_oe_expr=low_cov_group_ht.low_coverage_oe,
+            log_coverage_expr=low_cov_group_ht.log_coverage,
+        )
+        coverage_model = tuple(low_cov_group_ht.aggregate(coverage_model_expr).beta)
+    else:
+        coverage_model = None
+
     return coverage_model, plateau_models
 
 
@@ -669,24 +727,28 @@ def build_coverage_model(
 def get_all_pop_lengths(
     ht: hl.Table,
     pops: Tuple[str],
-    prefix: str = "observed_",
+    obs_expr: hl.expr.StructExpression,
 ) -> List[Tuple[str, str]]:
     """
-    Get the minimum length of observed variant counts array for each population downsamping.
+    Get the minimum length of observed variant counts array for each population downsampling.
 
-    The annotations are specified by the combination of `prefix` and each population in
-    `pops`.
+    The observed variant counts for each population in `pops` are specified by
+    annotations on the `obs_expr` expression.
 
-    :param ht: Input Table used to build population plateau models.
-    :param pops: Populations used to categorize observed variant counts in downsampings.
-    :param prefix: Prefix of population observed variant counts. Default is `observed_`.
+    The function also performs a check that arrays of variant counts within population
+    downsamplings all have the same lengths.
+
+    :param ht: Input Table containing `obs_expr`.
+    :param pops: Populations used to categorize observed variant counts in downsamplings.
+    :param obs_expr: Expression for the population observed variant counts. Should be a
+        struct containing an array for each pop in `pops`.
     :return: A Dictionary with the minimum array length for each population.
     """
     # TODO: This function will be converted into doing just the length check if there
-    # is no usage of pop_lengths in the constraint pipeline.
+    #  is no usage of pop_lengths in the constraint pipeline.
     # Get minimum length of downsamplings for each population.
     pop_downsampling_lengths = ht.aggregate(
-        [hl.agg.min(hl.len(ht[f"{prefix}{pop}"])) for pop in pops]
+        [hl.agg.min(hl.len(obs_expr[pop])) for pop in pops]
     )
 
     # Zip population name with their downsampling length.
@@ -696,7 +758,7 @@ def get_all_pop_lengths(
     assert ht.all(
         hl.all(
             lambda f: f,
-            [hl.len(ht[f"{prefix}{pop}"]) == length for length, pop in pop_lengths],
+            [hl.len(obs_expr[pop]) == length for length, pop in pop_lengths],
         )
     ), (
         "The arrays of variant counts within population downsamplings have different"
@@ -711,6 +773,7 @@ def get_constraint_grouping_expr(
     coverage_expr: Optional[hl.Int32Expression] = None,
     include_transcript_group: bool = True,
     include_canonical_group: bool = True,
+    include_mane_select_group: bool = False,
 ) -> Dict[str, Union[hl.StringExpression, hl.Int32Expression, hl.BooleanExpression]]:
     """
     Collect annotations used for constraint groupings.
@@ -744,6 +807,9 @@ def get_constraint_grouping_expr(
         groupings. Default is True.
     :param include_canonical_group: Whether to include canonical annotation in the
         groupings. Default is True.
+    :param include_mane_select_group: Whether to include mane_select annotation in the
+        groupings. Default is False.
+
     :return: A dictionary with keys as annotation names and values as actual
         annotations.
     """
@@ -764,12 +830,19 @@ def get_constraint_grouping_expr(
         groupings["transcript"] = vep_annotation_expr.transcript_id
     if include_canonical_group:
         groupings["canonical"] = hl.or_else(vep_annotation_expr.canonical == 1, False)
+    if include_mane_select_group:
+        groupings["mane_select"] = hl.or_else(
+            hl.is_defined(vep_annotation_expr.mane_select), False
+        )
 
     return groupings
 
 
 def annotate_exploded_vep_for_constraint_groupings(
-    ht: hl.Table, vep_annotation: str = "transcript_consequences"
+    ht: hl.Table,
+    vep_annotation: str = "transcript_consequences",
+    include_canonical_group: bool = True,
+    include_mane_select_group: bool = False,
 ) -> Tuple[Union[hl.Table, hl.MatrixTable], Tuple[str]]:
     """
     Annotate Table with annotations used for constraint groupings.
@@ -796,13 +869,29 @@ def annotate_exploded_vep_for_constraint_groupings(
     :param vep_annotation: Name of annotation in 'vep' annotation (one of
         "transcript_consequences" and "worst_csq_by_gene") that will be used for
         obtaining constraint annotations. Default is "transcript_consequences".
+    :param include_canonical_group: Whether to include 'canonical' annotation in the
+        groupings. Default is True. Ignored unless `vep_annotation` is  "transcript_consequences".
+    :param include_mane_select_group: Whether to include 'mane_select' annotation in the
+        groupings. Default is False. Ignored unless `vep_annotation` is  "transcript_consequences".
     :return: A tuple of input Table or MatrixTable with grouping annotations added and
         the names of added annotations.
     """
     if vep_annotation == "transcript_consequences":
-        include_transcript_group = include_canonical_group = True
+        if not include_canonical_group and not include_mane_select_group:
+            raise ValueError(
+                "If 'vep_annotation' is 'transcript_consequences', one of either"
+                " 'include_canonical_group' or 'include_mane_select_group' must be set!"
+            )
+        include_transcript_group = True
     else:
-        include_transcript_group = include_canonical_group = False
+        logger.warning(
+            "Setting both 'include_canonical_group' and 'include_mane_select_group' to"
+            " False (options cannot be used unless 'vep_annotation' is"
+            " 'transcript_consequences')."
+        )
+        include_transcript_group = False
+        include_canonical_group = False
+        include_mane_select_group = False
 
     # Annotate 'worst_csq_by_gene' to `ht` if it's specified for `vep_annotation`.
     if vep_annotation == "worst_csq_by_gene":
@@ -817,6 +906,7 @@ def annotate_exploded_vep_for_constraint_groupings(
         coverage_expr=ht.exome_coverage,
         include_transcript_group=include_transcript_group,
         include_canonical_group=include_canonical_group,
+        include_mane_select_group=include_mane_select_group,
     )
 
     return ht.annotate(**groupings), tuple(groupings.keys())
@@ -877,3 +967,313 @@ def compute_expected_variants(
     agg_expr.update({ann: agg_func(ht[ann]) for ann in ann_to_sum})
 
     return agg_expr
+
+
+def oe_aggregation_expr(
+    ht: hl.Table,
+    filter_expr: hl.expr.BooleanExpression,
+    pops: Tuple[str] = (),
+    exclude_mu_sum: bool = False,
+) -> hl.expr.StructExpression:
+    """
+    Get aggregation expressions to compute the observed:expected ratio for rows defined by `filter_expr`.
+
+    Return a Struct containing aggregation expressions to sum the number of observed
+    variants, possible variants, expected variants, and mutation rate (if
+    `exclude_mu_sum` is not True) for rows defined by `filter_expr`. The Struct also
+    includes an aggregation expression for the observed:expected ratio.
+
+    The following annotations are in the returned StructExpression:
+        - obs - the sum of observed variants filtered to `filter_expr`.
+        - mu - the sum of mutation rate of variants filtered to `filter_expr`.
+        - possible - possible number of variants filtered to `filter_expr`.
+        - exp - expected number of variants filtered to `filter_expr`.
+        - oe - observed:expected ratio of variants filtered to `filter_expr`.
+
+        If `pops` is specified:
+            - pop_exp - Struct with the expected number of variants per population (for
+              all pop in `pops`) filtered to `filter_expr`.
+            - pop_obs - Struct with the observed number of variants per population (for
+              all pop in `pops`) filtered to `filter_expr`.
+
+    .. note::
+        The following annotations should be present in `ht`:
+            - observed_variants
+            - mu
+            - possible_variants
+            - expected_variants
+        If `pops` is specified, the following annotations should also be present:
+            - expected_variants_{pop} for all pop in `pops`
+            - downsampling_counts_{pop} for all pop in `pops`
+
+    :param ht: Input Table to create observed:expected ratio aggregation expressions for.
+    :param filter_expr: Boolean expression used to filter `ht` before aggregation.
+    :param pops: List of populations to compute constraint metrics for. Default is ().
+    :param exclude_mu_sum: Whether to exclude mu sum aggregation expression from
+        returned struct. Default is False.
+    :return: StructExpression with observed:expected ratio aggregation expressions.
+    """
+    # Create aggregators that sum the number of observed variants, possible variants,
+    # and expected variants and compute observed:expected ratio.
+    agg_expr = {
+        "obs": hl.agg.sum(ht.observed_variants),
+        "exp": hl.agg.sum(ht.expected_variants),
+        "possible": hl.agg.sum(ht.possible_variants),
+    }
+    agg_expr["oe"] = divide_null(agg_expr["obs"], agg_expr["exp"])
+
+    # Create an aggregator that sums the mutation rate.
+    if not exclude_mu_sum:
+        agg_expr["mu"] = hl.agg.sum(ht.mu)
+
+    # Create aggregators that sum the number of observed variants
+    # and expected variants for each population if pops is specified.
+    if pops:
+        agg_expr["pop_exp"] = hl.struct(
+            **{pop: hl.agg.array_sum(ht[f"expected_variants_{pop}"]) for pop in pops}
+        )
+        agg_expr["pop_obs"] = hl.struct(
+            **{pop: hl.agg.array_sum(ht[f"downsampling_counts_{pop}"]) for pop in pops}
+        )
+
+    agg_expr = hl.struct(**agg_expr)
+    return hl.agg.group_by(filter_expr, agg_expr).get(True, hl.missing(agg_expr.dtype))
+
+
+def compute_pli(
+    ht: hl.Table,
+    obs_expr: hl.expr.Int64Expression,
+    exp_expr: hl.expr.Float64Expression,
+    expected_values: Optional[Dict[str, float]] = None,
+    min_diff_convergence: float = 0.001,
+) -> hl.StructExpression:
+    """
+    Compute the pLI score using the observed and expected variant counts.
+
+    Full details on pLI can be found in the ExAC paper: Lek, M., Karczewski, K.,
+    Minikel, E. et al. Analysis of protein-coding genetic variation in 60,706 humans.
+    Nature 536, 285–291 (2016).
+
+    pLI is the probability of being loss-of-function intolerant, and this function
+    computes that probability using the expectation-maximization (EM) algorithm.
+
+    We assume a 3 state model, where each gene fits into one of three categories
+    with respect loss-of-function variation sensitivity:
+
+        - Null: where protein truncating variation is completely tolerated by natural
+          selection.
+        - Recessive (Rec): where heterozygous pLoFs are tolerated but homozygous pLoFs
+          are not.
+        - Haploinsufficient (LI): where heterozygous pLoFs are not tolerated.
+
+    The function requires the expected amount of loss-of-function depletion for each of
+    these states. The default provided is based on the observed depletion of
+    protein-truncating variation in the Blekhman autosomal recessive and ClinGen
+    dosage sensitivity gene sets (Supplementary Information Table 12 of the above
+    reference):
+
+        - Null: 1.0, assume tolerant genes have the expected amount of truncating
+          variation.
+        - Rec: 0.463, derived from the empirical mean observed/expected rate of
+          truncating variation for recessive disease genes (0.463).
+        - LI: 0.089, derived from the empirical mean observed/expected rate of
+          truncating variation for severe haploinsufficient genes.
+
+    The output StructExpression will include the following annotations:
+
+        - pLI: Probability of loss-of-function intolerance; probability that transcript
+          falls into distribution of haploinsufficient genes.
+        - pNull: Probability that transcript falls into distribution of unconstrained
+          genes.
+        - pRec: Probability that transcript falls into distribution of recessive genes.
+
+    :param ht: Input Table containing `obs_expr` and `exp_expr`.
+    :param obs_expr: Expression for the number of observed variants on each gene or
+        transcript in `ht`.
+    :param exp_expr: Expression for the number of expected variants on each gene or
+        transcript in `ht`.
+    :param expected_values: Dictionary containing the expected values for 'Null',
+        'Rec', and 'LI' to use as starting values.
+    :param min_diff_convergence: Minimum iteration change in LI to consider the EM
+        model convergence criteria as met. Default is 0.001.
+    :return: StructExpression for pLI scores.
+    """
+    if expected_values is None:
+        expected_values = {"Null": 1.0, "Rec": 0.463, "LI": 0.089}
+
+    # Set up initial values.
+    last_pi = {k: 0 for k in expected_values.keys()}
+    pi = {k: 1 / len(expected_values.keys()) for k in expected_values.keys()}
+
+    dpois_expr = {
+        k: hl.or_missing(
+            exp_expr > 0, hl.dpois(obs_expr, exp_expr * expected_values[k])
+        )
+        for k in pi
+    }
+    _ht = ht.select(dpois=dpois_expr)
+    # Checkpoint the temp HT because it will need to be aggregated several times.
+    _ht = _ht.checkpoint(new_temp_file(prefix="compute_pli", extension="ht"))
+
+    # Calculate pLI scores.
+    while abs(pi["LI"] - last_pi["LI"]) > min_diff_convergence:
+        last_pi = copy.deepcopy(pi)
+        pi_expr = {k: v * _ht.dpois[k] for k, v in pi.items()}
+        row_sum_expr = hl.sum([pi_expr[k] for k in pi])
+        pi_expr = {k: pi_expr[k] / row_sum_expr for k, v in pi.items()}
+        pi = _ht.aggregate({k: hl.agg.mean(pi_expr[k]) for k in pi.keys()})
+
+    # Get expression for pLI scores.
+    pli_expr = {k: v * dpois_expr[k] for k, v in pi.items()}
+    row_sum_expr = hl.sum([pli_expr[k] for k in pi])
+
+    return hl.struct(**{f"p{k}": pli_expr[k] / row_sum_expr for k in pi.keys()})
+
+
+def oe_confidence_interval(
+    obs_expr: hl.expr.Int64Expression,
+    exp_expr: hl.expr.Float64Expression,
+    alpha: float = 0.05,
+) -> hl.expr.StructExpression:
+    """
+    Determine the confidence interval around the observed:expected ratio.
+
+    For a given pair of observed (`obs_expr`) and expected (`exp_expr`) values, the
+    function computes the density of the Poisson distribution (performed using Hail's
+    `dpois` module) with fixed k (`x` in `dpois` is set to the observed number of
+    variants) over a range of lambda (`lamb` in `dpois`) values, which are given by the
+    expected number of variants times a varying parameter ranging between 0 and 2 (the
+    observed:expected ratio is typically between 0 and 1, so we want to extend the
+    upper bound of the confidence interval to capture this). The cumulative density
+    function of the Poisson distribution density is computed and the value of the
+    varying parameter is extracted at points corresponding to `alpha` (defaults to 5%)
+    and 1-`alpha` (defaults to 95%) to indicate the lower and upper bounds of the
+    confidence interval.
+
+    The following annotations are in the output StructExpression:
+        - lower - the lower bound of confidence interval
+        - upper - the upper bound of confidence interval
+
+    :param obs_expr: Expression for the observed variant counts of pLoF, missense, or
+        synonymous variants in `ht`.
+    :param exp_expr: Expression for the expected variant counts of pLoF, missense, or
+        synonymous variants in `ht`.
+    :param alpha: The significance level used to compute the confidence interval.
+        Default is 0.05.
+    :return: StructExpression for the confidence interval lower and upper bounds.
+    """
+    # Set up range between 0 and 2.
+    range_expr = hl.range(0, 2000).map(lambda x: hl.float64(x) / 1000)
+    range_dpois_expr = range_expr.map(lambda x: hl.dpois(obs_expr, exp_expr * x))
+
+    # Compute cumulative density function of the Poisson distribution density.
+    cumulative_dpois_expr = hl.cumulative_sum(range_dpois_expr)
+    max_cumulative_dpois_expr = cumulative_dpois_expr[-1]
+    norm_dpois_expr = cumulative_dpois_expr.map(lambda x: x / max_cumulative_dpois_expr)
+
+    # Extract the value of the varying parameter within specified range.
+    lower_idx_expr = hl.argmax(
+        norm_dpois_expr.map(lambda x: hl.or_missing(x < alpha, x))
+    )
+    upper_idx_expr = hl.argmin(
+        norm_dpois_expr.map(lambda x: hl.or_missing(x > 1 - alpha, x))
+    )
+    return hl.struct(
+        lower=hl.if_else(obs_expr > 0, range_expr[lower_idx_expr], 0),
+        upper=range_expr[upper_idx_expr],
+    )
+
+
+def calculate_raw_z_score(
+    obs_expr: hl.expr.Int64Expression,
+    exp_expr: hl.expr.Float64Expression,
+) -> hl.expr.StructExpression:
+    """
+    Compute the signed raw z-score using observed and expected variant counts.
+
+    The raw z-scores are positive when the transcript had fewer variants than expected,
+    and are negative when transcripts had more variants than expected.
+
+    :param obs_expr: Observed variant count expression.
+    :param exp_expr: Expected variant count expression.
+    :return: StructExpression for the raw z-score.
+    """
+    chisq_expr = divide_null((obs_expr - exp_expr) ** 2, exp_expr)
+    return hl.sqrt(chisq_expr) * hl.if_else(obs_expr > exp_expr, -1, 1)
+
+
+def get_constraint_flags(
+    exp_expr: hl.expr.Float64Expression,
+    raw_z_expr: hl.expr.Float64Expression,
+    raw_z_lower_threshold: Optional[float] = -5.0,
+    raw_z_upper_threshold: Optional[float] = 5.0,
+    flag_postfix: str = "",
+) -> Dict[str, hl.expr.Expression]:
+    """
+    Determine the constraint flags that define why constraint will not be calculated.
+
+    Flags which are added:
+        - "no_exp_{flag_postfix}" - for genes that have missing or zero expected variants.
+        - "outlier_{flag_postfix}" - for genes that are raw z-score outliers:
+          (`raw_z_expr` < `raw_z_lower_threshold`) or (`raw_z_expr` >
+          `raw_z_upper_threshold`).
+
+    :param exp_expr: Expression for the expected variant counts of pLoF, missense, or
+        synonymous variants.
+    :param raw_z_expr: Expression for the signed raw z-score of pLoF, missense, or
+        synonymous variants.
+    :param raw_z_lower_threshold: Lower threshold for the raw z-score. When `raw_z_expr`
+        is less than this threshold it is considered an 'outlier'. Default is -5.0.
+    :param raw_z_upper_threshold: Upper threshold for the raw z-score. When `raw_z_expr`
+        is greater than this threshold it is considered an 'outlier'. Default is 5.0.
+    :param flag_postfix: Postfix to add to the end of the constraint flag names.
+    :return: Dictionary containing expressions for constraint flags.
+    """
+    outlier_expr = False
+    if raw_z_lower_threshold is not None:
+        outlier_expr |= raw_z_expr < raw_z_lower_threshold
+    if raw_z_upper_threshold is not None:
+        outlier_expr |= raw_z_expr > raw_z_upper_threshold
+
+    if flag_postfix:
+        flag_postfix = f"_{flag_postfix}"
+
+    constraint_flags = {
+        f"no_exp{flag_postfix}": hl.or_else(exp_expr <= 0, True),
+        f"outlier{flag_postfix}": hl.or_else(outlier_expr, False),
+    }
+
+    return constraint_flags
+
+
+def calculate_raw_z_score_sd(
+    raw_z_expr: hl.expr.Float64Expression,
+    flag_expr: hl.expr.StringExpression,
+    mirror_neg_raw_z: bool = True,
+) -> hl.expr.Expression:
+    """
+    Calculate the standard deviation of the raw z-score.
+
+    When using `mirror_neg_raw_z` is True, all the negative raw z-scores (defined by
+    `raw_z_expr`) are combined with those same z-scores multiplied by -1 (to create a
+    mirrored distribution).
+
+    :param raw_z_expr: Expression for the raw z-score.
+    :param flag_expr: Expression for the constraint flags. z-score will not be
+        calculated if flags are present.
+    :param mirror_neg_raw_z: Whether the standard deviation should be computed using a
+        mirrored distribution of negative `raw_z_expr`.
+    :return: StructExpression containing standard deviation of the raw z-score and
+        the z-score.
+    """
+    filter_expr = (hl.len(flag_expr) == 0) & hl.is_defined(raw_z_expr)
+
+    if mirror_neg_raw_z:
+        filter_expr &= raw_z_expr < 0
+        sd_expr = hl.agg.explode(
+            lambda x: hl.agg.stats(x), [raw_z_expr, -raw_z_expr]
+        ).stdev
+    else:
+        sd_expr = hl.agg.stats(raw_z_expr).stdev
+
+    return hl.agg.filter(filter_expr, sd_expr)

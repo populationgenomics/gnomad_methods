@@ -3,12 +3,12 @@
 import functools
 import logging
 import operator
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import hail as hl
 
+import gnomad.utils.annotations as annotate_utils
 from gnomad.resources.resource_utils import DataException
-from gnomad.utils.annotations import annotate_adj
 from gnomad.utils.reference_genome import get_reference_genome
 
 logging.basicConfig(format="%(levelname)s (%(name)s %(lineno)s): %(message)s")
@@ -19,7 +19,7 @@ logger.setLevel(logging.INFO)
 def filter_to_adj(mt: hl.MatrixTable) -> hl.MatrixTable:
     """Filter genotypes to adj criteria."""
     if "adj" not in list(mt.entry):
-        mt = annotate_adj(mt)
+        mt = annotate_utils.annotate_adj(mt)
     mt = mt.filter_entries(mt.adj)
     return mt.drop(mt.adj)
 
@@ -93,7 +93,7 @@ def filter_by_frequency(
             size += 1
             criteria.append(lambda f: f.meta.get("pop", "") == "global")
         if subpop:
-            raise Exception("No downsampling data for subpopulations implemented")
+            raise ValueError("No downsampling data for subpopulations implemented")
     criteria.append(lambda f: f.meta.size() == size)
 
     filt = lambda x: combine_functions(criteria, x)
@@ -237,7 +237,7 @@ def add_filters_expr(
         lambda x, y: x.union(y),
         current_filters,
         [
-            hl.cond(filter_condition, hl.set([filter_name]), hl.empty_set(hl.tstr))
+            hl.if_else(filter_condition, hl.set([filter_name]), hl.empty_set(hl.tstr))
             for filter_name, filter_condition in filters.items()
         ],
     )
@@ -412,7 +412,11 @@ def filter_x_nonpar(
     """
     rg = t.locus.dtype.reference_genome
     t = hl.filter_intervals(
-        t, [hl.parse_locus_interval(contig) for contig in rg.x_contigs]
+        t,
+        [
+            hl.parse_locus_interval(contig, reference_genome=rg.name)
+            for contig in rg.x_contigs
+        ],
     )
     non_par_expr = t.locus.in_x_nonpar()
 
@@ -434,7 +438,11 @@ def filter_y_nonpar(
     """
     rg = t.locus.dtype.reference_genome
     t = hl.filter_intervals(
-        t, [hl.parse_locus_interval(contig) for contig in rg.y_contigs]
+        t,
+        [
+            hl.parse_locus_interval(contig, reference_genome=rg.name)
+            for contig in rg.y_contigs
+        ],
     )
     non_par_expr = t.locus.in_y_nonpar()
 
@@ -443,3 +451,203 @@ def filter_y_nonpar(
         if isinstance(t, hl.Table)
         else t.filter_rows(non_par_expr)
     )
+
+
+def filter_by_numeric_expr_range(
+    t: Union[hl.MatrixTable, hl.Table],
+    filter_expr: hl.NumericExpression,
+    filter_range: tuple,
+    keep_between: bool = True,
+    inclusive: bool = True,
+) -> Union[hl.MatrixTable, hl.Table]:
+    """
+    Filter rows in the Table/MatrixTable based on the range of a numeric expression.
+
+    :param t: Input Table/MatrixTable.
+    :param filter_expr: NumericExpression to apply `filter_range` to.
+    :param filter_range: Range of values to apply to `filter_expr`.
+    :param keep_between: Whether to keep the values between `filter_range` instead of keeping values outside `filter_range`. Default is True.
+    :param inclusive: Whether or not to include the `filter_range` values themselves. Default is True.
+    :return: Table/MatrixTable filtered to rows with specified criteria.
+    """
+    if inclusive and keep_between or not inclusive and not keep_between:
+        criteria = (filter_expr >= filter_range[0]) & (filter_expr <= filter_range[1])
+    else:
+        criteria = (filter_expr > filter_range[0]) & (filter_expr < filter_range[1])
+
+    if isinstance(t, hl.MatrixTable):
+        return t.filter_rows(criteria, keep=keep_between)
+    else:
+        return t.filter(criteria, keep=keep_between)
+
+
+def filter_for_mu(
+    ht: hl.Table, gerp_lower_cutoff: float = -3.9885, gerp_upper_cutoff: float = 2.6607
+) -> hl.Table:
+    """
+    Filter to non-coding annotations and remove GERP outliers.
+
+    .. note::
+
+        Values for `gerp_lower_cutoff` and `gerp_upper_cutoff` default to -3.9885 and
+        2.6607, respectively. These values were precalculated on the GRCh37 context
+        table and define the 5th and 95th percentiles.
+
+    :param ht: Input Table.
+    :param gerp_lower_cutoff: Minimum GERP score for variant to be included. Default is -3.9885.
+    :param gerp_upper_cutoff: Maximum GERP score for variant to be included. Default is 2.6607.
+    :return: Table filtered to intron or intergenic variants with GERP outliers removed.
+    """
+    ht = filter_by_numeric_expr_range(
+        ht,
+        filter_expr=ht.gerp,
+        filter_range=(gerp_lower_cutoff, gerp_upper_cutoff),
+        keep_between=True,
+        inclusive=False,
+    )
+    ht = ht.filter(
+        (ht.vep.most_severe_consequence == "intron_variant")
+        | (ht.vep.most_severe_consequence == "intergenic_variant")
+    )
+
+    return ht
+
+
+def split_vds_by_strata(
+    vds: hl.vds.VariantDataset, strata_expr: hl.expr.Expression
+) -> Dict[str, hl.vds.VariantDataset]:
+    """
+    Split a VDS into multiple VDSs based on `strata_expr`.
+
+    :param vds: Input VDS.
+    :param strata_expr: Expression on VDS variant_data MT to split on.
+    :return: Dictionary where strata value is key and VDS is value.
+    """
+    vmt = vds.variant_data
+    s_by_strata = vmt.aggregate_cols(
+        hl.agg.group_by(strata_expr, hl.agg.collect_as_set(vmt.s))
+    )
+
+    return {
+        strata: hl.vds.filter_samples(vds, list(s)) for strata, s in s_by_strata.items()
+    }
+
+
+def filter_arrays_by_meta(
+    meta_expr: hl.expr.ArrayExpression,
+    meta_indexed_exprs: Union[
+        Dict[str, hl.expr.ArrayExpression], hl.expr.ArrayExpression
+    ],
+    items_to_filter: Union[Dict[str, List[str]], List[str]],
+    keep: bool = True,
+    combine_operator: str = "and",
+    exact_match: bool = False,
+) -> Tuple[
+    hl.expr.ArrayExpression,
+    Union[Dict[str, hl.expr.ArrayExpression], hl.expr.ArrayExpression],
+]:
+    """
+    Filter both metadata array expression and meta data indexed expression by `items_to_filter`.
+
+    The `items_to_filter` can be used to filter in the following ways based on
+    `meta_expr` items:
+    - By a list of keys, e.g. ["sex", "downsampling"].
+    - By specific key: value pairs, e.g. to filter where 'pop' is 'han' or 'papuan'
+    {"pop": ["han", "papuan"]}, or where 'pop' is 'afr' and/or 'sex' is 'XX'
+    {"pop": ["afr"], "sex": ["XX"]}.
+
+    The items can be kept or removed from `meta_indexed_expr` and `meta_expr` based on
+    the value of `keep`. For example if `meta_indexed_exprs` is {'freq': ht.freq,
+    'freq_meta_sample_count': ht.index_globals().freq_meta_sample_count} and `meta_expr`
+    is ht.freq_meta then if `keep` is True, the items specified by `items_to_filter`
+    such as  'pop' = 'han' will be kept and all other items will be removed from the
+    ht.freq, ht.freq_meta_sample_count, and ht.freq_meta. `meta_indexed_exprs` can also
+    be a single array expression such as ht.freq.
+
+    The filtering can also be applied such that all criteria must be met
+    (`combine_operator` = "and") by the `meta_expr` item in order to be filtered,
+    or at least one of the specified criteria must be met (`combine_operator` = "or")
+    by the `meta_expr` item in order to be filtered.
+
+    The `exact_match` parameter can be used to apply the `keep` parameter to only items
+    specified in the `items_to_filter` parameter. For example, by default, if `keep` is
+    True, `combine_operator` is "and", and `items_to_filter` is ["sex", "downsampling"],
+    then all items in `meta_expr` with both "sex" and "downsampling" as keys will be
+    kept. However, if `exact_match` is True, then the items
+    in `meta_expr` will only be kept if "sex" and "downsampling" are the only keys in
+    the meta dict.
+
+    :param meta_expr: Metadata expression that contains the values of the elements in
+        `meta_indexed_expr`. The most often used expression is `freq_meta` to index into
+        a 'freq' array.
+    :param meta_indexed_exprs: Either a Dictionary where the keys are the expression name
+        and the values are the expressions indexed by the `meta_expr` such as a 'freq'
+        array or just a single expression indexed by the `meta_expr`.
+    :param items_to_filter: Items to filter by, either a list or a dictionary.
+    :param keep: Whether to keep or remove the items specified by `items_to_filter`.
+    :param combine_operator: Whether to use "and" or "or" to combine the items
+        specified by `items_to_filter`.
+    :param exact_match: Whether to apply the `keep` parameter to only the items
+        specified in the `items_to_filter` parameter or to all items in `meta_expr`.
+        See the example above for more details. Default is False.
+    :return: A Tuple of the filtered metadata expression and a dictionary of metadata
+        indexed expressions when meta_indexed_expr is a Dictionary or a single filtered
+        array expression when meta_indexed_expr is a single array expression.
+    """
+    meta_expr = meta_expr.collect(_localize=False)[0]
+
+    if isinstance(meta_indexed_exprs, hl.expr.ArrayExpression):
+        meta_indexed_exprs = {"_tmp": meta_indexed_exprs}
+
+    if combine_operator == "and":
+        operator_func = hl.all
+    elif combine_operator == "or":
+        operator_func = hl.any
+    else:
+        raise ValueError(
+            "combine_operator must be one of 'and' or 'or', but found"
+            f" {combine_operator}!"
+        )
+
+    if isinstance(items_to_filter, list):
+        items_to_filter_set = hl.set(items_to_filter)
+        items_to_filter = [[k] for k in items_to_filter]
+        if exact_match:
+            filter_func = lambda m, k: (
+                hl.len(hl.set(m.keys()).difference(items_to_filter_set)) == 0
+            ) & m.contains(k)
+        else:
+            filter_func = lambda m, k: m.contains(k)
+    elif isinstance(items_to_filter, dict):
+        items_to_filter = [
+            [(k, v) for v in values] for k, values in items_to_filter.items()
+        ]
+        items_to_filter_set = hl.set(hl.flatten(items_to_filter))
+        if exact_match:
+            filter_func = lambda m, k: (
+                (hl.len(hl.set(m.items()).difference(items_to_filter_set)) == 0)
+                & (m.get(k[0], "") == k[1])
+            )
+        else:
+            filter_func = lambda m, k: (m.get(k[0], "") == k[1])
+    else:
+        raise TypeError("items_to_filter must be a list or a dictionary!")
+
+    meta_expr = hl.enumerate(meta_expr).filter(
+        lambda m: hl.bind(
+            lambda x: hl.if_else(keep, x, ~x),
+            operator_func(
+                [hl.any([filter_func(m[1], v) for v in k]) for k in items_to_filter]
+            ),
+        ),
+    )
+
+    meta_indexed_exprs = {
+        k: meta_expr.map(lambda x: v[x[0]]) for k, v in meta_indexed_exprs.items()
+    }
+    meta_expr = meta_expr.map(lambda x: x[1])
+
+    if "_tmp" in meta_indexed_exprs:
+        meta_indexed_exprs = meta_indexed_exprs["_tmp"]
+
+    return meta_expr, meta_indexed_exprs

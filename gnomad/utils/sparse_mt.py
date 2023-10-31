@@ -7,8 +7,10 @@ import hail as hl
 
 from gnomad.utils.annotations import (
     fs_from_sb,
+    generate_freq_group_membership_array,
     get_adj_expr,
     get_lowqual_expr,
+    pab_max_expr,
     sor_from_sb,
 )
 from gnomad.utils.intervals import interval_length, union_intervals
@@ -21,10 +23,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-INFO_SUM_AGG_FIELDS = ["QUALapprox"]
-INFO_INT32_SUM_AGG_FIELDS = ["VarDP"]
-INFO_MEDIAN_AGG_FIELDS = ["ReadPosRankSum", "MQRankSum"]
-INFO_ARRAY_SUM_AGG_FIELDS = ["SB", "RAW_MQandDP"]
+INFO_AGG_FIELDS = {
+    "sum_agg_fields": ["QUALapprox"],
+    "int32_sum_agg_fields": ["VarDP"],
+    "median_agg_fields": ["ReadPosRankSum", "MQRankSum"],
+    "array_sum_agg_fields": ["SB", "RAW_MQandDP"],
+}
+
+AS_INFO_AGG_FIELDS = {
+    "sum_agg_fields": ["AS_QUALapprox", "AS_RAW_MQ"],
+    "int32_sum_agg_fields": ["AS_VarDP"],
+    "median_agg_fields": ["AS_RAW_ReadPosRankSum", "AS_RAW_MQRankSum"],
+    "array_sum_agg_fields": ["AS_SB_TABLE"],
+}
 
 
 def compute_last_ref_block_end(mt: hl.MatrixTable) -> hl.Table:
@@ -143,38 +154,46 @@ def _get_info_agg_expr(
     mt: hl.MatrixTable,
     sum_agg_fields: Union[
         List[str], Dict[str, hl.expr.NumericExpression]
-    ] = INFO_SUM_AGG_FIELDS,
+    ] = INFO_AGG_FIELDS["sum_agg_fields"],
     int32_sum_agg_fields: Union[
         List[str], Dict[str, hl.expr.NumericExpression]
-    ] = INFO_INT32_SUM_AGG_FIELDS,
+    ] = INFO_AGG_FIELDS["int32_sum_agg_fields"],
     median_agg_fields: Union[
         List[str], Dict[str, hl.expr.NumericExpression]
-    ] = INFO_MEDIAN_AGG_FIELDS,
+    ] = INFO_AGG_FIELDS["median_agg_fields"],
     array_sum_agg_fields: Union[
         List[str], Dict[str, hl.expr.ArrayNumericExpression]
-    ] = INFO_ARRAY_SUM_AGG_FIELDS,
+    ] = INFO_AGG_FIELDS["array_sum_agg_fields"],
     prefix: str = "",
+    treat_fields_as_allele_specific: bool = False,
 ) -> Dict[str, hl.expr.Aggregation]:
     """
     Create Aggregators for both site or AS info expression aggregations.
 
     .. note::
 
-        - If `SB` is specified in array_sum_agg_fields, it will be aggregated as `AS_SB_TABLE`, according to GATK standard nomenclature.
-        - If `RAW_MQandDP` is specified in array_sum_agg_fields, it will be used for the `MQ` calculation and then dropped according to GATK recommendation.
-        - If `RAW_MQ` and `MQ_DP` are given, they will be used for the `MQ` calculation and then dropped according to GATK recommendation.
-        - If the fields to be aggregate (`sum_agg_fields`, `int32_sum_agg_fields`, `median_agg_fields`) are passed as
-          list of str, then they should correspond to entry fields in `mt` or in `mt.gvcf_info`.
-        - Priority is given to entry fields in `mt` over those in `mt.gvcf_info` in case of a name clash.
+        - If `SB` is specified in array_sum_agg_fields, it will be aggregated as
+          `AS_SB_TABLE`, according to GATK standard nomenclature.
+        - If `RAW_MQandDP` is specified in array_sum_agg_fields, it will be used for
+          the `MQ` calculation and then dropped according to GATK recommendation.
+        - If `RAW_MQ` and `MQ_DP` are given, they will be used for the `MQ` calculation
+          and then dropped according to GATK recommendation.
+        - If the fields to be aggregated (`sum_agg_fields`, `int32_sum_agg_fields`,
+          `median_agg_fields`) are passed as list of str, then they should correspond
+          to entry fields in `mt` or in mt.gvcf_info`.
+        - Priority is given to entry fields in `mt` over those in `mt.gvcf_info` in
+          case of a name clash.
 
     :param mt: Input MT
     :param sum_agg_fields: Fields to aggregate using sum.
     :param int32_sum_agg_fields: Fields to aggregate using sum using int32.
     :param median_agg_fields: Fields to aggregate using (approximate) median.
-    :param median_agg_fields: Fields to aggregate using element-wise summing over an array.
+    :param array_sum_agg_fields: Fields to aggregate using element-wise summing over an
+        array.
     :param prefix: Optional prefix for the fields. Used for adding 'AS_' in the AS case.
-
-    :return: Dictionary of expression names and their corresponding aggregation Expression
+    :param treat_fields_as_allele_specific: Treat info fields as allele-specific. Defaults to False.
+    :return: Dictionary of expression names and their corresponding aggregation
+        Expression.
     """
 
     def _agg_list_to_dict(
@@ -186,7 +205,7 @@ def _get_info_agg_expr(
 
         out_fields.update({f: mt[f] for f in fields if f in mt.entry})
 
-        # Check that all fields were found
+        # Check that all fields were found.
         missing_fields = [f for f in fields if f not in out_fields]
         if missing_fields:
             raise ValueError(
@@ -194,9 +213,24 @@ def _get_info_agg_expr(
                 " under mt.gvcf_info: {}".format(",".join(missing_fields))
             )
 
+        if treat_fields_as_allele_specific:
+            # TODO: Change to use hl.vds.local_to_global when fill_value can accept
+            #  missing (error in v0.2.119).
+            out_fields = {
+                f: hl.bind(
+                    lambda x: hl.if_else(f == "AS_SB_TABLE", x, x[1:]),
+                    hl.range(hl.len(mt.alleles)).map(
+                        lambda i: hl.or_missing(
+                            mt.LA.contains(i), out_fields[f][mt.LA.index(i)]
+                        )
+                    ),
+                )
+                for f in fields
+            }
+
         return out_fields
 
-    # Map str to expressions where needed
+    # Map str to expressions where needed.
     if isinstance(sum_agg_fields, list):
         sum_agg_fields = _agg_list_to_dict(mt, sum_agg_fields)
 
@@ -209,33 +243,38 @@ def _get_info_agg_expr(
     if isinstance(array_sum_agg_fields, list):
         array_sum_agg_fields = _agg_list_to_dict(mt, array_sum_agg_fields)
 
-    # Create aggregators
-    agg_expr = {}
+    aggs = [
+        (median_agg_fields, lambda x: hl.agg.approx_quantiles(x, 0.5)),
+        (sum_agg_fields, hl.agg.sum),
+        (int32_sum_agg_fields, lambda x: hl.int32(hl.agg.sum(x))),
+        (array_sum_agg_fields, hl.agg.array_sum),
+    ]
 
-    agg_expr.update(
-        {
-            f"{prefix}{k}": hl.agg.approx_quantiles(expr, 0.5)
-            for k, expr in median_agg_fields.items()
-        }
-    )
-    agg_expr.update(
-        {f"{prefix}{k}": hl.agg.sum(expr) for k, expr in sum_agg_fields.items()}
-    )
-    agg_expr.update(
-        {
-            f"{prefix}{k}": hl.int32(hl.agg.sum(expr))
-            for k, expr in int32_sum_agg_fields.items()
-        }
-    )
-    agg_expr.update(
-        {
-            f"{prefix}{k}": hl.agg.array_agg(lambda x: hl.agg.sum(x), expr)
-            for k, expr in array_sum_agg_fields.items()
-        }
-    )
+    # Create aggregators.
+    agg_expr = {}
+    for agg_fields, agg_func in aggs:
+        for k, expr in agg_fields.items():
+            if treat_fields_as_allele_specific:
+                # If annotation is of the form 'AS_RAW_*_RankSum' it has a histogram
+                # representation where keys give the per-variant rank sum value to one
+                # decimal place followed by a comma and the corresponding count for
+                # that value, so we want to sum the rank sum value (first element).
+                # Rename annotation in the form 'AS_RAW_*_RankSum' to 'AS_*_RankSum'.
+                if k.startswith("AS_RAW_") and k.endswith("RankSum"):
+                    agg_expr[f"{prefix}{k.replace('_RAW', '')}"] = hl.agg.array_agg(
+                        lambda x: agg_func(hl.or_missing(hl.is_defined(x), x[0])), expr
+                    )
+                else:
+                    agg_expr[f"{prefix}{k}"] = hl.agg.array_agg(
+                        lambda x: agg_func(x), expr
+                    )
+            else:
+                agg_expr[f"{prefix}{k}"] = agg_func(expr)
+
+    if treat_fields_as_allele_specific:
+        prefix = "AS_"
 
     # Handle annotations combinations and casting for specific annotations
-
     # If RAW_MQandDP is in agg_expr or if both MQ_DP and RAW_MQ are, compute MQ instead
     mq_tuple = None
     if f"{prefix}RAW_MQandDP" in agg_expr:
@@ -245,6 +284,15 @@ def _get_info_agg_expr(
             *[prefix] * 5,
         )
         mq_tuple = agg_expr.pop(f"{prefix}RAW_MQandDP")
+    elif "AS_RAW_MQ" in agg_expr and treat_fields_as_allele_specific:
+        logger.info(
+            "Computing AS_MQ as sqrt(AS_RAW_MQ[i]/AD[i+1]). "
+            "Note that AS_MQ will be set to 0 if AS_RAW_MQ == 0."
+        )
+        ad_expr = hl.vds.local_to_global(
+            mt.LAD, mt.LA, hl.len(mt.alleles), fill_value=0, number="R"
+        )
+        mq_tuple = hl.zip(agg_expr.pop("AS_RAW_MQ"), hl.agg.array_sum(ad_expr[1:]))
     elif f"{prefix}RAW_MQ" in agg_expr and f"{prefix}MQ_DP" in agg_expr:
         logger.info(
             "Computing %sMQ as sqrt(%sRAW_MQ/%sMQ_DP). "
@@ -254,9 +302,14 @@ def _get_info_agg_expr(
         mq_tuple = (agg_expr.pop(f"{prefix}RAW_MQ"), agg_expr.pop(f"{prefix}MQ_DP"))
 
     if mq_tuple is not None:
-        agg_expr[f"{prefix}MQ"] = hl.cond(
-            mq_tuple[1] > 0, hl.sqrt(mq_tuple[0] / mq_tuple[1]), 0
-        )
+        if treat_fields_as_allele_specific:
+            agg_expr[f"{prefix}MQ"] = mq_tuple.map(
+                lambda x: hl.if_else(x[1] > 0, hl.sqrt(x[0] / x[1]), 0)
+            )
+        else:
+            agg_expr[f"{prefix}MQ"] = hl.if_else(
+                mq_tuple[1] > 0, hl.sqrt(mq_tuple[0] / mq_tuple[1]), 0
+            )
 
     # If both VarDP and QUALapprox are present, also compute QD.
     if f"{prefix}VarDP" in agg_expr and f"{prefix}QUALapprox" in agg_expr:
@@ -265,14 +318,25 @@ def _get_info_agg_expr(
             "Note that %sQD will be set to 0 if %sVarDP == 0.",
             *[prefix] * 5,
         )
-        var_dp = hl.int32(hl.agg.sum(int32_sum_agg_fields["VarDP"]))
-        agg_expr[f"{prefix}QD"] = hl.cond(
-            var_dp > 0, agg_expr[f"{prefix}QUALapprox"] / var_dp, 0
-        )
+        var_dp = agg_expr[f"{prefix}VarDP"]
+        qual_approx = agg_expr[f"{prefix}QUALapprox"]
+        if treat_fields_as_allele_specific:
+            agg_expr[f"{prefix}QD"] = hl.map(
+                lambda x: hl.if_else(x[1] > 0, x[0] / x[1], 0),
+                hl.zip(qual_approx, var_dp),
+            )
+        else:
+            agg_expr[f"{prefix}QD"] = hl.if_else(var_dp > 0, qual_approx / var_dp, 0)
 
-    # SB needs to be cast to int32 for FS down the line
+    # SB needs to be cast to int32 for FS down the line.
     if f"{prefix}SB" in agg_expr:
         agg_expr[f"{prefix}SB"] = agg_expr[f"{prefix}SB"].map(lambda x: hl.int32(x))
+
+    # SB needs to be cast to int32 for FS down the line.
+    if "AS_SB_TABLE" in agg_expr:
+        agg_expr["AS_SB_TABLE"] = agg_expr["AS_SB_TABLE"].map(
+            lambda x: x.map(lambda y: hl.int32(y))
+        )
 
     return agg_expr
 
@@ -281,36 +345,52 @@ def get_as_info_expr(
     mt: hl.MatrixTable,
     sum_agg_fields: Union[
         List[str], Dict[str, hl.expr.NumericExpression]
-    ] = INFO_SUM_AGG_FIELDS,
+    ] = INFO_AGG_FIELDS["sum_agg_fields"],
     int32_sum_agg_fields: Union[
         List[str], Dict[str, hl.expr.NumericExpression]
-    ] = INFO_INT32_SUM_AGG_FIELDS,
+    ] = INFO_AGG_FIELDS["int32_sum_agg_fields"],
     median_agg_fields: Union[
         List[str], Dict[str, hl.expr.NumericExpression]
-    ] = INFO_MEDIAN_AGG_FIELDS,
+    ] = INFO_AGG_FIELDS["median_agg_fields"],
     array_sum_agg_fields: Union[
         List[str], Dict[str, hl.expr.ArrayNumericExpression]
-    ] = INFO_ARRAY_SUM_AGG_FIELDS,
+    ] = INFO_AGG_FIELDS["array_sum_agg_fields"],
     alt_alleles_range_array_field: str = "alt_alleles_range_array",
+    treat_fields_as_allele_specific: bool = False,
 ) -> hl.expr.StructExpression:
     """
     Return an allele-specific annotation Struct containing typical VCF INFO fields from GVCF INFO fields stored in the MT entries.
 
     .. note::
 
-        - If `SB` is specified in array_sum_agg_fields, it will be aggregated as `AS_SB_TABLE`, according to GATK standard nomenclature.
-        - If `RAW_MQandDP` is specified in array_sum_agg_fields, it will be used for the `MQ` calculation and then dropped according to GATK recommendation.
-        - If `RAW_MQ` and `MQ_DP` are given, they will be used for the `MQ` calculation and then dropped according to GATK recommendation.
-        - If the fields to be aggregate (`sum_agg_fields`, `int32_sum_agg_fields`, `median_agg_fields`) are passed as list of str,
-          then they should correspond to entry fields in `mt` or in `mt.gvcf_info`.
-        - Priority is given to entry fields in `mt` over those in `mt.gvcf_info` in case of a name clash.
+        - If `SB` is specified in array_sum_agg_fields, it will be aggregated as
+          `AS_SB_TABLE`, according to GATK standard nomenclature.
+        - If `RAW_MQandDP` is specified in array_sum_agg_fields, it will be used for
+          the `MQ` calculation and then dropped according to GATK recommendation.
+        - If `RAW_MQ` and `MQ_DP` are given, they will be used for the `MQ` calculation
+          and then dropped according to GATK recommendation.
+        - If the fields to be aggregate (`sum_agg_fields`, `int32_sum_agg_fields`,
+          `median_agg_fields`) are passed as list of str, then they should correspond
+          to entry fields in `mt` or in `mt.gvcf_info`.
+        - Priority is given to entry fields in `mt` over those in `mt.gvcf_info` in
+          case of a name clash.
+        - If `treat_fields_as_allele_specific` is False, it's expected that there is a
+          single value for each entry field to be aggregated. Then when performing the
+          aggregation per global alternate allele, that value is included in the
+          aggregation if the global allele is present in the entry's list of local
+          alleles. If `treat_fields_as_allele_specific` is True, it's expected that
+          each entry field to be aggregated has one value per local allele, and each
+          of those is mapped to a global allele for aggregation.
 
     :param mt: Input Matrix Table
     :param sum_agg_fields: Fields to aggregate using sum.
     :param int32_sum_agg_fields: Fields to aggregate using sum using int32.
     :param median_agg_fields: Fields to aggregate using (approximate) median.
     :param array_sum_agg_fields: Fields to aggregate using array sum.
-    :param alt_alleles_range_array_field: Annotation containing an array of the range of alternate alleles e.g., `hl.range(1, hl.len(mt.alleles))`
+    :param alt_alleles_range_array_field: Annotation containing an array of the range
+        of alternate alleles e.g., `hl.range(1, hl.len(mt.alleles))`
+    :param treat_fields_as_allele_specific: Treat info fields as allele-specific.
+        Defaults to False.
     :return: Expression containing the AS info fields
     """
     if "DP" in list(sum_agg_fields) + list(int32_sum_agg_fields):
@@ -326,12 +406,9 @@ def get_as_info_expr(
         int32_sum_agg_fields=int32_sum_agg_fields,
         median_agg_fields=median_agg_fields,
         array_sum_agg_fields=array_sum_agg_fields,
-        prefix="AS_",
+        prefix="" if treat_fields_as_allele_specific else "AS_",
+        treat_fields_as_allele_specific=treat_fields_as_allele_specific,
     )
-
-    # Rename AS_SB to AS_SB_TABLE if present
-    if "AS_SB" in agg_expr:
-        agg_expr["AS_SB_TABLE"] = agg_expr.pop("AS_SB")
 
     if alt_alleles_range_array_field not in mt.row or mt[
         alt_alleles_range_array_field
@@ -343,29 +420,41 @@ def get_as_info_expr(
         logger.error(msg)
         raise ValueError(msg)
 
-    # Modify aggregations to aggregate per allele
-    agg_expr = {
-        f: hl.agg.array_agg(
-            lambda ai: hl.agg.filter(mt.LA.contains(ai), expr),
-            mt[alt_alleles_range_array_field],
-        )
-        for f, expr in agg_expr.items()
-    }
+    if not treat_fields_as_allele_specific:
+        # Modify aggregations to aggregate per allele
+        agg_expr = {
+            f: hl.agg.array_agg(
+                lambda ai: hl.agg.filter(mt.LA.contains(ai), expr),
+                mt[alt_alleles_range_array_field],
+            )
+            for f, expr in agg_expr.items()
+        }
 
     # Run aggregations
     info = hl.struct(**agg_expr)
 
-    # Add SB Ax2 aggregation logic and FS if SB is present
-    if "AS_SB_TABLE" in info:
-        as_sb_table = hl.array(
-            [
-                info.AS_SB_TABLE.filter(lambda x: hl.is_defined(x)).fold(
-                    lambda i, j: i[:2] + j[:2], [0, 0]
-                )  # ref
-            ]
-        ).extend(
-            info.AS_SB_TABLE.map(lambda x: x[2:])  # each alt
-        )
+    # Add FS and SOR if SB is present.
+    if "AS_SB_TABLE" in info or "AS_SB" in info:
+        drop = []
+        # Rename AS_SB to AS_SB_TABLE if present and add SB Ax2 aggregation logic.
+        if "AS_SB" in agg_expr:
+            if "AS_SB_TABLE" in agg_expr:
+                logger.warning(
+                    "Both `AS_SB` and `AS_SB_TABLE` were specified for aggregation."
+                    " `AS_SB` will be used for aggregation."
+                )
+            as_sb_table = hl.array(
+                [
+                    info.AS_SB.filter(lambda x: hl.is_defined(x)).fold(
+                        lambda i, j: i[:2] + j[:2], [0, 0]
+                    )  # ref
+                ]
+            ).extend(
+                info.AS_SB.map(lambda x: x[2:])  # each alt
+            )
+            drop = ["AS_SB"]
+        else:
+            as_sb_table = info.AS_SB_TABLE
         info = info.annotate(
             AS_SB_TABLE=as_sb_table,
             AS_FS=hl.range(1, hl.len(mt.alleles)).map(
@@ -374,7 +463,7 @@ def get_as_info_expr(
             AS_SOR=hl.range(1, hl.len(mt.alleles)).map(
                 lambda i: sor_from_sb(as_sb_table[0].extend(as_sb_table[i]))
             ),
-        )
+        ).drop(*drop)
 
     return info
 
@@ -383,27 +472,31 @@ def get_site_info_expr(
     mt: hl.MatrixTable,
     sum_agg_fields: Union[
         List[str], Dict[str, hl.expr.NumericExpression]
-    ] = INFO_SUM_AGG_FIELDS,
+    ] = INFO_AGG_FIELDS["sum_agg_fields"],
     int32_sum_agg_fields: Union[
         List[str], Dict[str, hl.expr.NumericExpression]
-    ] = INFO_INT32_SUM_AGG_FIELDS,
+    ] = INFO_AGG_FIELDS["int32_sum_agg_fields"],
     median_agg_fields: Union[
         List[str], Dict[str, hl.expr.NumericExpression]
-    ] = INFO_MEDIAN_AGG_FIELDS,
+    ] = INFO_AGG_FIELDS["median_agg_fields"],
     array_sum_agg_fields: Union[
         List[str], Dict[str, hl.expr.ArrayNumericExpression]
-    ] = INFO_ARRAY_SUM_AGG_FIELDS,
+    ] = INFO_AGG_FIELDS["array_sum_agg_fields"],
 ) -> hl.expr.StructExpression:
     """
     Create a site-level annotation Struct aggregating typical VCF INFO fields from GVCF INFO fields stored in the MT entries.
 
     .. note::
 
-        - If `RAW_MQandDP` is specified in array_sum_agg_fields, it will be used for the `MQ` calculation and then dropped according to GATK recommendation.
-        - If `RAW_MQ` and `MQ_DP` are given, they will be used for the `MQ` calculation and then dropped according to GATK recommendation.
-        - If the fields to be aggregate (`sum_agg_fields`, `int32_sum_agg_fields`, `median_agg_fields`) are passed as
-          list of str, then they should correspond to entry fields in `mt` or in `mt.gvcf_info`.
-        - Priority is given to entry fields in `mt` over those in `mt.gvcf_info` in case of a name clash.
+        - If `RAW_MQandDP` is specified in array_sum_agg_fields, it will be used for
+          the `MQ` calculation and then dropped according to GATK recommendation.
+        - If `RAW_MQ` and `MQ_DP` are given, they will be used for the `MQ` calculation
+          and then dropped according to GATK recommendation.
+        - If the fields to be aggregate (`sum_agg_fields`, `int32_sum_agg_fields`,
+          `median_agg_fields`) are passed as list of str, then they should correspond
+          to entry fields in `mt` or in `mt.gvcf_info`.
+        - Priority is given to entry fields in `mt` over those in `mt.gvcf_info` in
+          case of a name clash.
 
     :param mt: Input Matrix Table
     :param sum_agg_fields: Fields to aggregate using sum.
@@ -426,7 +519,7 @@ def get_site_info_expr(
     )
 
     # Add FS and SOR if SB is present
-    # This is done outside of _get_info_agg_expr as the behavior is different
+    # This is done outside _get_info_agg_expr as the behavior is different
     # in site vs allele-specific versions
     if "SB" in agg_expr:
         agg_expr["FS"] = fs_from_sb(agg_expr["SB"])
@@ -446,73 +539,156 @@ def get_site_info_expr(
 
 
 def default_compute_info(
-    mt: hl.MatrixTable, site_annotations: bool = False, n_partitions: int = 5000
+    mt: hl.MatrixTable,
+    site_annotations: bool = False,
+    as_annotations: bool = False,
+    # Set to True by default to prevent a breaking change.
+    quasi_as_annotations: bool = True,
+    n_partitions: Optional[int] = 5000,
+    lowqual_indel_phred_het_prior: int = 40,
+    ac_filter_groups: Optional[Dict[str, hl.Expression]] = None,
 ) -> hl.Table:
     """
     Compute a HT with the typical GATK allele-specific (AS) info fields as well as ACs and lowqual fields.
 
     .. note::
 
-        This table doesn't split multi-allelic sites.
+        - This table doesn't split multi-allelic sites.
+        - At least one of `site_annotations`, `as_annotations` or `quasi_as_annotations`
+          must be True.
 
     :param mt: Input MatrixTable. Note that this table should be filtered to nonref sites.
-    :param site_annotations: Whether to also generate site level info fields. Default is False.
-    :param n_partitions: Number of desired partitions for output Table. Default is 5000.
+    :param site_annotations: Whether to generate site level info fields. Default is False.
+    :param as_annotations: Whether to generate allele-specific info fields using
+        allele-specific annotations in gvcf_info. Default is False.
+    :param quasi_as_annotations: Whether to generate allele-specific info fields using
+        non-allele-specific annotations in gvcf_info, but performing per allele
+        aggregations. This method can be used in cases where genotype data doesn't
+        contain allele-specific annotations to approximate allele-specific annotations.
+        Default is True.
+    :param n_partitions: Optional number of desired partitions for output Table. If
+        specified, naive_coalesce is performed. Default is 5000.
+    :param lowqual_indel_phred_het_prior: Phred-scaled prior for a het genotype at a
+        site with a low quality indel. Default is 40. We use 1/10k bases (phred=40) to
+        be more consistent with the filtering used by Broad's Data Sciences Platform
+        for VQSR.
+    :param ac_filter_groups: Optional dictionary of sample filter expressions to compute
+        additional groupings of ACs. Default is None.
     :return: Table with info fields
     :rtype: Table
     """
-    # Move gvcf info entries out from nested struct
+    if not site_annotations and not as_annotations and not quasi_as_annotations:
+        raise ValueError(
+            "At least one of `site_annotations`, `as_annotations`, or "
+            "`quasi_as_annotations` must be True!"
+        )
+
+    # Add a temporary annotation for allele count groupings.
+    ac_filter_groups = {"": True, **(ac_filter_groups or {})}
+    mt = mt.annotate_cols(_ac_filter_groups=ac_filter_groups)
+
+    # Move gvcf info entries out from nested struct.
     mt = mt.transmute_entries(**mt.gvcf_info)
 
     # Adding alt_alleles_range_array as a required annotation for
-    # get_as_info_expr to reduce memory usage
+    # get_as_info_expr to reduce memory usage.
     mt = mt.annotate_rows(alt_alleles_range_array=hl.range(1, hl.len(mt.alleles)))
 
-    # Compute AS info expr
-    info_expr = get_as_info_expr(mt)
+    info_expr = None
+    quasi_info_expr = None
+
+    # Compute quasi-AS info expr.
+    if quasi_as_annotations:
+        info_expr = get_as_info_expr(mt)
+
+    # Compute AS info expr using gvcf_info allele specific annotations.
+    if as_annotations:
+        if info_expr is not None:
+            quasi_info_expr = info_expr
+        info_expr = get_as_info_expr(
+            mt,
+            **AS_INFO_AGG_FIELDS,
+            treat_fields_as_allele_specific=True,
+        )
+
+    if info_expr is not None:
+        # Add allele specific pab_max
+        info_expr = info_expr.annotate(
+            AS_pab_max=pab_max_expr(mt.LGT, mt.LAD, mt.LA, hl.len(mt.alleles))
+        )
 
     if site_annotations:
-        info_expr = info_expr.annotate(**get_site_info_expr(mt))
+        site_expr = get_site_info_expr(mt)
+        if info_expr is None:
+            info_expr = site_expr
+        else:
+            info_expr = info_expr.annotate(**site_expr)
 
-    # Add AC and AC_raw:
-    # First compute ACs for each non-ref allele, grouped by adj
-    grp_ac_expr = hl.agg.array_agg(
-        lambda ai: hl.agg.filter(
-            mt.LA.contains(ai),
-            hl.agg.group_by(
-                get_adj_expr(mt.LGT, mt.GQ, mt.DP, mt.LAD),
-                hl.agg.sum(
-                    mt.LGT.one_hot_alleles(mt.LA.map(lambda x: hl.str(x)))[
-                        mt.LA.index(ai)
-                    ]
+    # Add 'AC' and 'AC_raw' for each allele count filter group requested.
+    # First compute ACs for each non-ref allele, grouped by adj.
+    grp_ac_expr = {
+        f: hl.agg.array_agg(
+            lambda ai: hl.agg.filter(
+                mt.LA.contains(ai) & mt._ac_filter_groups[f],
+                hl.agg.group_by(
+                    get_adj_expr(mt.LGT, mt.GQ, mt.DP, mt.LAD),
+                    hl.agg.sum(
+                        mt.LGT.one_hot_alleles(mt.LA.map(lambda x: hl.str(x)))[
+                            mt.LA.index(ai)
+                        ]
+                    ),
                 ),
             ),
-        ),
-        hl.range(1, hl.len(mt.alleles)),
-    )
+            mt.alt_alleles_range_array,
+        )
+        for f in ac_filter_groups
+    }
 
     # Then, for each non-ref allele, compute
-    # AC as the adj group
-    # AC_raw as the sum of adj and non-adj groups
+    # 'AC' as the adj group
+    # 'AC_raw' as the sum of adj and non-adj groups
     info_expr = info_expr.annotate(
-        AC_raw=grp_ac_expr.map(lambda i: hl.int32(i.get(True, 0) + i.get(False, 0))),
-        AC=grp_ac_expr.map(lambda i: hl.int32(i.get(True, 0))),
+        **{
+            f"AC{'_' + f if f else f}_raw": grp.map(
+                lambda i: hl.int32(i.get(True, 0) + i.get(False, 0))
+            )
+            for f, grp in grp_ac_expr.items()
+        },
+        **{
+            f"AC{'_' + f if f else f}": grp.map(lambda i: hl.int32(i.get(True, 0)))
+            for f, grp in grp_ac_expr.items()
+        },
     )
 
-    info_ht = mt.select_rows(info=info_expr).rows()
+    ann_expr = {"info": info_expr}
+    if quasi_info_expr is not None:
+        ann_expr["quasi_info"] = quasi_info_expr
+
+    info_ht = mt.select_rows(**ann_expr).rows()
 
     # Add AS lowqual flag
     info_ht = info_ht.annotate(
-        AS_lowqual=get_lowqual_expr(info_ht.alleles, info_ht.info.AS_QUALapprox)
+        AS_lowqual=get_lowqual_expr(
+            info_ht.alleles,
+            info_ht.info.AS_QUALapprox,
+            indel_phred_het_prior=lowqual_indel_phred_het_prior,
+        )
     )
 
     if site_annotations:
         # Add lowqual flag
         info_ht = info_ht.annotate(
-            lowqual=get_lowqual_expr(info_ht.alleles, info_ht.info.QUALapprox)
+            lowqual=get_lowqual_expr(
+                info_ht.alleles,
+                info_ht.info.QUALapprox,
+                indel_phred_het_prior=lowqual_indel_phred_het_prior,
+            )
         )
 
-    return info_ht.naive_coalesce(n_partitions)
+    if n_partitions is not None:
+        info_ht = info_ht.naive_coalesce(n_partitions)
+
+    return info_ht
 
 
 def split_info_annotation(
@@ -531,9 +707,13 @@ def split_info_annotation(
             f: info_expr[f][a_index - 1]
             for f in info_expr
             if f.startswith("AC") or (f.startswith("AS_") and not f == "AS_SB_TABLE")
-        },
-        AS_SB_TABLE=info_expr.AS_SB_TABLE[0].extend(info_expr.AS_SB_TABLE[a_index]),
+        }
     )
+    if "AS_SB_TABLE" in info_expr:
+        info_expr = info_expr.annotate(
+            AS_SB_TABLE=info_expr.AS_SB_TABLE[0].extend(info_expr.AS_SB_TABLE[a_index])
+        )
+
     return info_expr
 
 
@@ -686,21 +866,22 @@ def impute_sex_ploidy(
                     f"{chrom}_mean_dp": hl.agg.filter(
                         chr_mt.LGT.is_non_ref(),
                         hl.agg.sum(chr_mt.DP),
-                    )
-                    / hl.agg.filter(chr_mt.LGT.is_non_ref(), hl.agg.count())
+                    ) / hl.agg.filter(chr_mt.LGT.is_non_ref(), hl.agg.count())
                 }
             ).cols()
         else:
             return chr_mt.select_cols(
                 **{
-                    f"{chrom}_mean_dp": hl.agg.sum(
-                        hl.if_else(
-                            chr_mt.LGT.is_hom_ref(),
-                            chr_mt.DP * (1 + chr_mt.END - chr_mt.locus.position),
-                            chr_mt.DP,
+                    f"{chrom}_mean_dp": (
+                        hl.agg.sum(
+                            hl.if_else(
+                                chr_mt.LGT.is_hom_ref(),
+                                chr_mt.DP * (1 + chr_mt.END - chr_mt.locus.position),
+                                chr_mt.DP,
+                            )
                         )
+                        / contig_size
                     )
-                    / contig_size
                 }
             ).cols()
 
@@ -715,18 +896,23 @@ def impute_sex_ploidy(
 
     return ht.annotate(
         **{
-            f"{chr_x}_ploidy": ht[f"{chr_x}_mean_dp"]
-            / (ht[f"{normalization_contig}_mean_dp"] / 2),
-            f"{chr_y}_ploidy": ht[f"{chr_y}_mean_dp"]
-            / (ht[f"{normalization_contig}_mean_dp"] / 2),
+            f"{chr_x}_ploidy": ht[f"{chr_x}_mean_dp"] / (
+                ht[f"{normalization_contig}_mean_dp"] / 2
+            ),
+            f"{chr_y}_ploidy": ht[f"{chr_y}_mean_dp"] / (
+                ht[f"{normalization_contig}_mean_dp"] / 2
+            ),
         }
     )
 
 
 def compute_coverage_stats(
-    mt: hl.MatrixTable,
+    mtds: Union[hl.MatrixTable, hl.vds.VariantDataset],
     reference_ht: hl.Table,
+    interval_ht: Optional[hl.Table] = None,
     coverage_over_x_bins: List[int] = [1, 5, 10, 15, 20, 25, 30, 50, 100],
+    row_key_fields: List[str] = ["locus"],
+    strata_expr: Optional[List[Dict[str, hl.expr.StringExpression]]] = None,
 ) -> hl.Table:
     """
     Compute coverage statistics for every base of the `reference_ht` provided.
@@ -737,39 +923,132 @@ def compute_coverage_stats(
         - total DP
         - fraction of samples with coverage above X, for each x in `coverage_over_x_bins`
 
-    The `reference_ht` is a table that contains row for each locus coverage should be computed on.
-    It needs to be keyed with the same keys as `mt`, typically either `locus` or `locus, alleles`.
-    The `reference_ht` can e.g. be created using `get_reference_ht`
+    The `reference_ht` is a Table that contains a row for each locus coverage that should be
+    computed on. It needs to be keyed by `locus`. The `reference_ht` can e.g. be
+    created using `get_reference_ht`.
 
-    :param mt: Input sparse MT
+    :param mtds: Input sparse MT or VDS
     :param reference_ht: Input reference HT
+    :param interval_ht: Optional Table containing intervals to filter to
     :param coverage_over_x_bins: List of boundaries for computing samples over X
+    :param row_key_fields: List of row key fields to use for joining `mtds` with
+        `reference_ht`
+    :param strata_expr: Optional list of dicts containing expressions to stratify the
+        coverage stats by.
     :return: Table with per-base coverage stats
     """
-    n_samples = mt.count_cols()
-    print(f"Computing coverage stats on {n_samples} samples.")
+    is_vds = isinstance(mtds, hl.vds.VariantDataset)
+    if is_vds:
+        mt = mtds.variant_data
+    else:
+        mt = mtds
+
+    if strata_expr is None:
+        strata_expr = {}
+        no_strata = True
+    else:
+        no_strata = False
+
+    # Annotate the MT cols with each of the expressions in strata_expr and redefine
+    # strata_expr based on the column HT with added annotations.
+    ht = mt.annotate_cols(**{k: v for d in strata_expr for k, v in d.items()}).cols()
+    strata_expr = [{k: ht[k] for k in d} for d in strata_expr]
+
+    # Use the function for creating the frequency stratified by `freq_meta`,
+    # `freq_meta_sample_count`, and `group_membership` annotations to give
+    # stratification group membership info for computing coverage. By default, this
+    # function returns annotations where the second element is a placeholder for the
+    # "raw" frequency of all samples, where the first 2 elements are the same sample
+    # set, but freq_meta startswith [{"group": "adj", "group": "raw", ...]. Use
+    # `no_raw_group` to exclude the "raw" group so there is a single annotation
+    # representing the full samples set. `freq_meta` is updated below to remove "group"
+    # from all dicts.
+    group_membership_ht = generate_freq_group_membership_array(
+        ht, strata_expr, no_raw_group=True
+    )
+    n_samples = group_membership_ht.count()
+    sample_counts = group_membership_ht.index_globals().freq_meta_sample_count
+
+    logger.info("Computing coverage stats on %d samples.", n_samples)
+    # Filter datasets to interval list
+    if interval_ht is not None:
+        reference_ht = reference_ht.filter(
+            hl.is_defined(interval_ht[reference_ht.locus])
+        )
+
+        if is_vds:
+            mtds = hl.vds.filter_intervals(
+                vds=mtds, intervals=interval_ht, split_reference_blocks=True
+            )
+        else:
+            raise NotImplementedError(
+                "Filtering to an interval list for a sparse Matrix Table is currently"
+                " not supported."
+            )
 
     # Create an outer join with the reference Table
-    mt = mt.select_entries("END", "DP").select_cols().select_rows()
-    col_key_fields = list(mt.col_key)
-    t = mt._localize_entries("__entries", "__cols")
-    t = t.join(reference_ht.key_by(*mt.row_key).select(_in_ref=True), how="outer")
-    t = t.annotate(
-        __entries=hl.or_else(
-            t.__entries,
-            hl.range(n_samples).map(lambda x: hl.null(t.__entries.dtype.element_type)),
-        )
-    )
-    mt = t._unlocalize_entries("__entries", "__cols", col_key_fields)
+    def join_with_ref(mt: hl.MatrixTable) -> hl.MatrixTable:
+        """
+        Outer join MatrixTable with reference Table.
 
-    # Densify
-    mt = hl.experimental.densify(mt)
+        Add 'in_ref' annotation indicating whether a given position is found in the reference Table.
+
+        :param mt: Input MatrixTable.
+        :return: MatrixTable with 'in_ref' annotation added.
+        """
+        keep_entries = ["DP"]
+        if "END" in mt.entry:
+            keep_entries.append("END")
+        if "LGT" in mt.entry:
+            keep_entries.append("LGT")
+        if "GT" in mt.entry:
+            keep_entries.append("GT")
+        mt_col_key_fields = list(mt.col_key)
+        mt_row_key_fields = list(mt.row_key)
+        t = mt.select_entries(*keep_entries).select_cols().select_rows()
+        t = t._localize_entries("__entries", "__cols")
+        t = (
+            t.key_by(*row_key_fields)
+            .join(
+                reference_ht.key_by(*row_key_fields).select(_in_ref=True),
+                how="outer",
+            )
+            .key_by(*mt_row_key_fields)
+        )
+        t = t.annotate(
+            __entries=hl.or_else(
+                t.__entries,
+                hl.range(n_samples).map(
+                    lambda x: hl.missing(t.__entries.dtype.element_type)
+                ),
+            )
+        )
+
+        return t._unlocalize_entries("__entries", "__cols", mt_col_key_fields)
+
+    if is_vds:
+        mtds = hl.vds.VariantDataset(
+            mtds.reference_data.select_entries("END", "DP").select_cols().select_rows(),
+            join_with_ref(mtds.variant_data),
+        )
+
+        # Densify
+        mt = hl.vds.to_dense_mt(mtds)
+    else:
+        mtds = join_with_ref(mtds)
+        # Densify
+        mt = hl.experimental.densify(mtds)
 
     # Filter rows where the reference is missing
     mt = mt.filter_rows(mt._in_ref)
 
     # Unfilter entries so that entries with no ref block overlap aren't null
     mt = mt.unfilter_entries()
+
+    # Annotate with group membership
+    mt = mt.annotate_cols(
+        group_membership=group_membership_ht[mt.col_key].group_membership
+    )
 
     # Compute coverage stats
     coverage_over_x_bins = sorted(coverage_over_x_bins)
@@ -781,45 +1060,93 @@ def compute_coverage_stats(
     coverage_counter_expr = hl.agg.counter(
         hl.min(max_coverage_bin, hl.or_else(mt.DP, 0))
     )
+    mean_expr = hl.agg.mean(hl.or_else(mt.DP, 0))
 
-    # This expression aggregates the DP counter in reverse order of the coverage_over_x_bins
-    # and computes the cumulative sum over them.
+    # Annotate all rows with coverage stats for each strata group.
+    ht = mt.select_rows(
+        coverage_stats=hl.agg.array_agg(
+            lambda x: hl.agg.filter(
+                x,
+                hl.struct(
+                    coverage_counter=coverage_counter_expr,
+                    mean=hl.if_else(hl.is_nan(mean_expr), 0, mean_expr),
+                    median_approx=hl.or_else(
+                        hl.agg.approx_median(hl.or_else(mt.DP, 0)), 0
+                    ),
+                    total_DP=hl.agg.sum(mt.DP),
+                ),
+            ),
+            mt.group_membership,
+        )
+    ).rows()
+    ht = ht.checkpoint(hl.utils.new_temp_file("coverage_stats", "ht"))
+
+    # This expression aggregates the DP counter in reverse order of the
+    # coverage_over_x_bins and computes the cumulative sum over them.
     # It needs to be in reverse order because we want the sum over samples
     # covered by > X.
-    count_array_expr = hl.cumulative_sum(
-        hl.array(
-            [
-                hl.int32(coverage_counter_expr.get(max_coverage_bin, 0))
-            ]  # The coverage was already floored to the max_coverage_bin, so no more aggregation is needed for the max bin
-            # For each of the other bins, coverage needs to be summed between the
-            # boundaries
-        ).extend(
-            hl.range(hl.len(hl_coverage_over_x_bins) - 1, 0, step=-1).map(
-                lambda i: hl.sum(
-                    hl.range(
-                        hl_coverage_over_x_bins[i - 1], hl_coverage_over_x_bins[i]
-                    ).map(lambda j: hl.int32(coverage_counter_expr.get(j, 0)))
+    count_array_expr = ht.coverage_stats.map(
+        lambda x: hl.cumulative_sum(
+            hl.array(
+                # The coverage was already floored to the max_coverage_bin, so no more
+                # aggregation is needed for the max bin.
+                [hl.int32(x.coverage_counter.get(max_coverage_bin, 0))]
+                # For each of the other bins, coverage needs to be summed between the
+                # boundaries.
+            ).extend(
+                hl.range(hl.len(hl_coverage_over_x_bins) - 1, 0, step=-1).map(
+                    lambda i: hl.sum(
+                        hl.range(
+                            hl_coverage_over_x_bins[i - 1], hl_coverage_over_x_bins[i]
+                        ).map(lambda j: hl.int32(x.coverage_counter.get(j, 0)))
+                    )
                 )
             )
         )
     )
-    mean_expr = hl.agg.mean(hl.or_else(mt.DP, 0))
 
-    # Annotate rows now
-    return mt.select_rows(
-        mean=hl.cond(hl.is_nan(mean_expr), 0, mean_expr),
-        median_approx=hl.or_else(hl.agg.approx_median(hl.or_else(mt.DP, 0)), 0),
-        total_DP=hl.agg.sum(mt.DP),
-        **{
-            f"over_{x}": count_array_expr[i] / n_samples
-            for i, x in zip(
-                range(
-                    len(coverage_over_x_bins) - 1, -1, -1
-                ),  # Reverse the bin index as count_array_expr has the reverse order
-                coverage_over_x_bins,
-            )
-        },
-    ).rows()
+    ht = ht.annotate(
+        coverage_stats=hl.map(
+            lambda c, g, n: c.annotate(
+                **{
+                    f"over_{x}": g[i] / n
+                    for i, x in zip(
+                        range(len(coverage_over_x_bins) - 1, -1, -1),
+                        # Reverse the bin index as count_array_expr has reverse order.
+                        coverage_over_x_bins,
+                    )
+                }
+            ).drop("coverage_counter"),
+            ht.coverage_stats,
+            count_array_expr,
+            sample_counts,
+        )
+    )
+    current_keys = list(ht.key)
+    ht = (
+        ht.key_by(*row_key_fields)
+        .select_globals()
+        .drop(*[k for k in current_keys if k not in row_key_fields])
+    )
+    if no_strata:
+        # If there was no stratification, move coverage_stats annotations to the top
+        # level.
+        ht = ht.select(**{k: ht.coverage_stats[0][k] for k in ht.coverage_stats[0]})
+    else:
+        # If there was stratification, add the metadata and sample count info for the
+        # stratification to the globals.
+        ht = ht.annotate_globals(
+            coverage_stats_meta=(
+                group_membership_ht.index_globals().freq_meta.map(
+                    lambda x: hl.dict(x.items().filter(lambda m: m[0] != "group"))
+                )
+            ),
+            coverage_stats_meta_sample_count=(
+                group_membership_ht.index_globals().freq_meta_sample_count
+            ),
+        )
+
+    return ht
 
 
 def filter_ref_blocks(

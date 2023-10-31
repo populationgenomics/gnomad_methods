@@ -12,9 +12,9 @@ import pyspark.sql
 from pyspark.ml import Pipeline
 from pyspark.ml.classification import RandomForestClassifier
 from pyspark.ml.feature import IndexToString, StringIndexer, VectorAssembler
+from pyspark.ml.functions import vector_to_array
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, udf  # pylint: disable=no-name-in-module
-from pyspark.sql.types import ArrayType, DoubleType
+from pyspark.sql.functions import col  # pylint: disable=no-name-in-module
 
 from gnomad.utils.file_utils import file_exists
 
@@ -45,7 +45,7 @@ def run_rf_test(
     )
 
     mt = mt.annotate_rows(
-        label=hl.cond(mt["feature1"] & (mt["feature2"] > 0), "TP", "FP")
+        label=hl.if_else(mt["feature1"] & (mt["feature2"] > 0), "TP", "FP")
     )
     ht = mt.rows()
 
@@ -220,7 +220,7 @@ def median_impute_features(
 
 
 def ht_to_rf_df(
-    ht: hl.Table, features: List[str], label: str, index: str = None
+    ht: hl.Table, features: List[str], label: str = None, index: str = None
 ) -> pyspark.sql.DataFrame:
     """
     Create a Spark dataframe ready for RF from a HT.
@@ -234,16 +234,22 @@ def ht_to_rf_df(
 
     :param ht: Input HT
     :param features: Features that will be used for RF
-    :param label: Label column that will be predicted by RF
+    :param label: Optional label column that will be predicted by RF
     :param index: Optional index column to keep (E.g. for joining results back at later stage)
     :return: Spark Dataframe
     """
-    cols_to_keep = features + [label]
+    cols_to_keep = features[:]
+
+    if label:
+        cols_to_keep.append(label)
     if index:
         cols_to_keep.append(index)
 
     df = ht.key_by().select(*cols_to_keep).to_spark()
-    df = df.dropna(subset=features).fillna("NA", subset=label)
+    df = df.dropna(subset=features)
+
+    if label:
+        df = df.fillna("NA", subset=label)
 
     return df
 
@@ -329,7 +335,7 @@ def apply_rf_model(
     ht: hl.Table,
     rf_model: pyspark.ml.PipelineModel,
     features: List[str],
-    label: str,
+    label: str = None,
     probability_col_name: str = "rf_probability",
     prediction_col_name: str = "rf_prediction",
 ) -> hl.Table:
@@ -339,14 +345,17 @@ def apply_rf_model(
     :param ht: Input HT
     :param rf_model: Random Forest pipeline model
     :param features: List of feature columns in the pipeline. !Should match the model list of features!
-    :param label: Column containing the labels. !Should match the model labels!
+    :param label: Optional column containing labels. !Should match the model labels!
     :param probability_col_name: Name of the column that will store the RF probabilities
     :param prediction_col_name: Name of the column that will store the RF predictions
     :return: Table with RF columns
     """
     logger.info("Applying RF model.")
 
-    check_ht_fields_for_spark(ht, features + [label])
+    check_fields = features[:]
+    if label:
+        check_fields.append(label)
+    check_ht_fields_for_spark(ht, check_fields)
 
     index_name = "rf_idx"
     while index_name in ht.row:
@@ -359,30 +368,28 @@ def apply_rf_model(
     df = ht_to_rf_df(ht, features, label, index_name)
 
     rf_df = rf_model.transform(df)
+    prob_cols = get_labels(rf_model)
 
-    def to_array(col):
-        def to_array_(v):
-            return v.toArray().tolist()
-
-        return udf(to_array_, ArrayType(DoubleType()))(col)
+    rf_df = rf_df.withColumn("probability", vector_to_array("probability")).select(
+        [index_name, "predictedLabel"]
+        + [col("probability")[i] for i in range(len(prob_cols))]
+    )
+    new_colnames = [index_name, "predictedLabel"] + prob_cols
+    rf_df = rf_df.toDF(*new_colnames)
 
     # Note: SparkSession is needed to write DF to disk before converting to HT;
-    # hail currently fails without intermediate write
+    # the resulting HT sometimes has missing and/or duplicate rows without
+    # the intermediate write.
     spark = SparkSession.builder.getOrCreate()
-    rf_df.withColumn("probability", to_array(col("probability"))).select(
-        [index_name, "probability", "predictedLabel"]
-    ).write.mode("overwrite").save("rf_probs.parquet")
-    rf_df = spark.read.format("parquet").load("rf_probs.parquet")
-    rf_ht = hl.Table.from_spark(rf_df)
-    rf_ht = rf_ht.checkpoint("/tmp/rf_raw_pred.ht", overwrite=True)
-    rf_ht = rf_ht.key_by(index_name)
+    rf_df.write.mode("overwrite").save("rf_probs.parquet")
+    rf_df = spark.read.parquet("rf_probs.parquet")
 
+    rf_ht = hl.Table.from_spark(rf_df)
+
+    rf_ht = rf_ht.key_by(index_name)
     ht = ht.annotate(
         **{
-            probability_col_name: {
-                label: rf_ht[ht[index_name]]["probability"][i]
-                for i, label in enumerate(get_labels(rf_model))
-            },
+            probability_col_name: {c: rf_ht[ht[index_name]][c] for c in prob_cols},
             prediction_col_name: rf_ht[ht[index_name]]["predictedLabel"],
         }
     )

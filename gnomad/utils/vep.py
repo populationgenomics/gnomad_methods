@@ -15,6 +15,12 @@ logging.basicConfig(format="%(levelname)s (%(name)s %(lineno)s): %(message)s")
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+VEP_VERSIONS = ["101", "105"]
+CURRENT_VEP_VERSION = VEP_VERSIONS[-1]
+"""
+Versions of VEP used in gnomAD data, the latest version is 105.
+"""
+
 # Note that this is the current as of v81 with some included for backwards
 # compatibility (VEP <= 75)
 CSQ_CODING_HIGH_IMPACT = [
@@ -85,12 +91,18 @@ VEP_CONFIG_PATH = "file:///vep_data/vep-gcloud.json"
 Constant that contains the local path to the VEP config file
 """
 
-VEP_CSQ_FIELDS = "Allele|Consequence|IMPACT|SYMBOL|Gene|Feature_type|Feature|BIOTYPE|EXON|INTRON|HGVSc|HGVSp|cDNA_position|CDS_position|Protein_position|Amino_acids|Codons|ALLELE_NUM|DISTANCE|STRAND|VARIANT_CLASS|MINIMISED|SYMBOL_SOURCE|HGNC_ID|CANONICAL|TSL|APPRIS|CCDS|ENSP|SWISSPROT|TREMBL|UNIPARC|GENE_PHENO|SIFT|PolyPhen|DOMAINS|HGVS_OFFSET|MOTIF_NAME|MOTIF_POS|HIGH_INF_POS|MOTIF_SCORE_CHANGE|LoF|LoF_filter|LoF_flags|LoF_info"
+VEP_CSQ_FIELDS = {
+    "101": "Allele|Consequence|IMPACT|SYMBOL|Gene|Feature_type|Feature|BIOTYPE|EXON|INTRON|HGVSc|HGVSp|cDNA_position|CDS_position|Protein_position|Amino_acids|Codons|ALLELE_NUM|DISTANCE|STRAND|VARIANT_CLASS|MINIMISED|SYMBOL_SOURCE|HGNC_ID|CANONICAL|TSL|APPRIS|CCDS|ENSP|SWISSPROT|TREMBL|UNIPARC|GENE_PHENO|SIFT|PolyPhen|DOMAINS|HGVS_OFFSET|MOTIF_NAME|MOTIF_POS|HIGH_INF_POS|MOTIF_SCORE_CHANGE|LoF|LoF_filter|LoF_flags|LoF_info",
+    "105": "Allele|Consequence|IMPACT|SYMBOL|Gene|Feature_type|Feature|BIOTYPE|EXON|INTRON|HGVSc|HGVSp|cDNA_position|CDS_position|Protein_position|Amino_acids|Codons|ALLELE_NUM|DISTANCE|STRAND|FLAGS|VARIANT_CLASS|SYMBOL_SOURCE|HGNC_ID|CANONICAL|MANE_SELECT|MANE_PLUS_CLINICAL|TSL|APPRIS|CCDS|ENSP|UNIPROT_ISOFORM|SOURCE|SIFT|PolyPhen|DOMAINS|miRNA|HGVS_OFFSET|PUBMED|MOTIF_NAME|MOTIF_POS|HIGH_INF_POS|MOTIF_SCORE_CHANGE|TRANSCRIPTION_FACTORS|LoF|LoF_filter|LoF_flags|LoF_info",
+}
 """
-Constant that defines the order of VEP annotations used in VCF export.
+Constant that defines the order of VEP annotations used in VCF export, currently stored in a dictionary with the VEP version as the key.
 """
 
-VEP_CSQ_HEADER = f"Consequence annotations from Ensembl VEP. Format: {VEP_CSQ_FIELDS}"
+VEP_CSQ_HEADER = (
+    "Consequence annotations from Ensembl VEP. Format:"
+    f" {VEP_CSQ_FIELDS[CURRENT_VEP_VERSION]}"
+)
 """
 Constant that contains description for VEP used in VCF export.
 """
@@ -195,8 +207,9 @@ def vep_or_lookup_vep(
 
         if vep_version not in vep_context.versions:
             logger.warning(
-                "No VEPed context Table available for genome build %s and VEP version"
-                " %s, all variants will be VEPed using the following VEP:\n%s",
+                "No VEPed context Table available for genome build %s and VEP"
+                " version %s, all variants will be VEPed using the following"
+                " VEP:\n%s",
                 reference,
                 vep_version,
                 vep_help,
@@ -234,6 +247,10 @@ def vep_or_lookup_vep(
         revep_ht = revep_ht.drop("vep_proc_id")
     if "vep_proc_id" in list(vep_ht.row):
         vep_ht = vep_ht.drop("vep_proc_id")
+
+    vep_ht = vep_ht.annotate_globals(
+        vep_version=f"v{vep_version}", vep_help=vep_help, vep_config=vep_config
+    )
 
     return vep_ht.union(revep_ht)
 
@@ -365,6 +382,29 @@ def filter_vep_to_canonical_transcripts(
     )
 
 
+def filter_vep_to_mane_select_transcripts(
+    mt: Union[hl.MatrixTable, hl.Table],
+    vep_root: str = "vep",
+    filter_empty_csq: bool = False,
+) -> Union[hl.MatrixTable, hl.Table]:
+    """
+    Filter VEP transcript consequences to those in the MANE Select transcript.
+
+    :param mt: Input Table or MatrixTable.
+    :param vep_root: Name used for VEP annotation. Default is 'vep'.
+    :param filter_empty_csq: Whether to filter out rows where 'transcript_consequences' is empty. Default is False.
+    :return: Table or MatrixTable with VEP transcript consequences filtered.
+    """
+    return filter_vep_transcript_csqs(
+        mt,
+        vep_root,
+        synonymous=False,
+        canonical=False,
+        mane_select=True,
+        filter_empty_csq=filter_empty_csq,
+    )
+
+
 def filter_vep_to_synonymous_variants(
     mt: Union[hl.MatrixTable, hl.Table],
     vep_root: str = "vep",
@@ -384,7 +424,9 @@ def filter_vep_to_synonymous_variants(
 
 
 def vep_struct_to_csq(
-    vep_expr: hl.expr.StructExpression, csq_fields: str = VEP_CSQ_FIELDS
+    vep_expr: hl.expr.StructExpression,
+    csq_fields: str = VEP_CSQ_FIELDS[CURRENT_VEP_VERSION],
+    has_polyphen_sift: bool = True,
 ) -> hl.expr.ArrayExpression:
     """
     Given a VEP Struct, returns and array of VEP VCF CSQ strings (one per consequence in the struct).
@@ -399,7 +441,8 @@ def vep_struct_to_csq(
     hl.str(), so it may differ from their usual VEP CSQ representation.
 
     :param vep_expr: The input VEP Struct
-    :param csq_fields: The | delimited list of fields to include in the CSQ (in that order)
+    :param csq_fields: The | delimited list of fields to include in the CSQ (in that order), default is the CSQ fields of the CURRENT_VEP_VERSION.
+    :param has_polyphen_sift: Whether the input VEP Struct has PolyPhen and SIFT annotations. Default is True.
     :return: The corresponding CSQ strings
     """
     _csq_fields = [f.lower() for f in csq_fields.split("|")]
@@ -419,11 +462,15 @@ def vep_struct_to_csq(
                 "feature": (
                     element.transcript_id
                     if "transcript_id" in element
-                    else element.regulatory_feature_id
-                    if "regulatory_feature_id" in element
-                    else element.motif_feature_id
-                    if "motif_feature_id" in element
-                    else ""
+                    else (
+                        element.regulatory_feature_id
+                        if "regulatory_feature_id" in element
+                        else (
+                            element.motif_feature_id
+                            if "motif_feature_id" in element
+                            else ""
+                        )
+                    )
                 ),
                 "variant_class": vep_expr.variant_class,
             }
@@ -433,37 +480,49 @@ def vep_struct_to_csq(
         if feature_type == "Transcript":
             fields.update(
                 {
-                    "canonical": hl.cond(element.canonical == 1, "YES", ""),
+                    "canonical": hl.if_else(element.canonical == 1, "YES", ""),
                     "ensp": element.protein_id,
                     "gene": element.gene_id,
                     "symbol": element.gene_symbol,
                     "symbol_source": element.gene_symbol_source,
-                    "cdna_position": hl.str(element.cdna_start)
-                    + hl.cond(
+                    "cdna_position": hl.str(element.cdna_start) + hl.if_else(
                         element.cdna_start == element.cdna_end,
                         "",
                         "-" + hl.str(element.cdna_end),
                     ),
-                    "cds_position": hl.str(element.cds_start)
-                    + hl.cond(
+                    "cds_position": hl.str(element.cds_start) + hl.if_else(
                         element.cds_start == element.cds_end,
                         "",
                         "-" + hl.str(element.cds_end),
                     ),
-                    "protein_position": hl.str(element.protein_start)
-                    + hl.cond(
+                    "mirna": hl.delimit(element.mirna, "&"),
+                    "protein_position": hl.str(element.protein_start) + hl.if_else(
                         element.protein_start == element.protein_end,
                         "",
                         "-" + hl.str(element.protein_end),
                     ),
-                    "sift": element.sift_prediction
-                    + "("
-                    + hl.format("%.3f", element.sift_score)
-                    + ")",
-                    "polyphen": element.polyphen_prediction
-                    + "("
-                    + hl.format("%.3f", element.polyphen_score)
-                    + ")",
+                    "uniprot_isoform": hl.delimit(element.uniprot_isoform, "&"),
+                }
+            )
+            if has_polyphen_sift:
+                fields.update(
+                    {
+                        "sift": (
+                            element.sift_prediction
+                            + "("
+                            + hl.format("%.3f", element.sift_score)
+                            + ")"
+                        ),
+                        "polyphen": (
+                            element.polyphen_prediction
+                            + "("
+                            + hl.format("%.3f", element.polyphen_score)
+                            + ")"
+                        ),
+                    }
+                )
+            fields.update(
+                {
                     "domains": hl.delimit(
                         element.domains.map(lambda d: d.db + ":" + d.name), "&"
                     ),
@@ -471,6 +530,9 @@ def vep_struct_to_csq(
             )
         elif feature_type == "MotifFeature":
             fields["motif_score_change"] = hl.format("%.3f", element.motif_score_change)
+            fields["transcription_factors"] = hl.delimit(
+                element.transcription_factors, "&"
+            )
 
         return hl.delimit(
             [hl.or_else(hl.str(fields.get(f, "")), "") for f in _csq_fields], "|"
@@ -577,7 +639,9 @@ def filter_vep_transcript_csqs(
     vep_root: str = "vep",
     synonymous: bool = True,
     canonical: bool = True,
+    mane_select: bool = False,
     filter_empty_csq: bool = True,
+    ensembl_only: bool = True,
 ) -> Union[hl.Table, hl.MatrixTable]:
     """
     Filter VEP transcript consequences based on specified criteria, and optionally filter to variants where transcript consequences is not empty after filtering.
@@ -592,10 +656,12 @@ def filter_vep_transcript_csqs(
     :param vep_root: Name used for VEP annotation. Default is 'vep'.
     :param synonymous: Whether to filter to variants where the most severe consequence is 'synonymous_variant'. Default is True.
     :param canonical: Whether to filter to only canonical transcripts. Default is True.
+    :param mane_select: Whether to filter to only MANE Select transcripts. Default is False.
     :param filter_empty_csq: Whether to filter out rows where 'transcript_consequences' is empty, after filtering 'transcript_consequences' to the specified criteria. Default is True.
+    :param ensembl_only: Whether to filter to only Ensembl transcipts. This option is useful for deduplicating transcripts that are the same between RefSeq and Emsembl. Default is True.
     :return: Table or MatrixTable filtered to specified criteria.
     """
-    if not synonymous and not canonical and not filter_empty_csq:
+    if not synonymous and not (canonical or mane_select) and not filter_empty_csq:
         logger.warning("No changes have been made to input Table/MatrixTable!")
         return t
 
@@ -605,6 +671,11 @@ def filter_vep_transcript_csqs(
         criteria.append(lambda csq: csq.most_severe_consequence == "synonymous_variant")
     if canonical:
         criteria.append(lambda csq: csq.canonical == 1)
+    if mane_select:
+        criteria.append(lambda csq: hl.is_defined(csq.mane_select))
+    if ensembl_only:
+        criteria.append(lambda csq: csq.transcript_id.startswith("ENST"))
+
     transcript_csqs = transcript_csqs.filter(lambda x: combine_functions(criteria, x))
     is_mt = isinstance(t, hl.MatrixTable)
     vep_data = {vep_root: t[vep_root].annotate(transcript_consequences=transcript_csqs)}

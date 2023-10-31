@@ -265,6 +265,118 @@ def get_relationship_expr(  # TODO: The threshold detection could be easily auto
     )
 
 
+def get_slope_int_relationship_expr(
+    kin_expr: hl.expr.NumericExpression,
+    y_expr: hl.expr.NumericExpression,
+    parent_child_max_y: float,
+    second_degree_sibling_lower_cutoff_slope: float,
+    second_degree_sibling_lower_cutoff_intercept: float,
+    second_degree_upper_sibling_lower_cutoff_slope: float,
+    second_degree_upper_sibling_lower_cutoff_intercept: float,
+    duplicate_twin_min_kin: float = 0.42,
+    second_degree_min_kin: float = 0.1,
+    duplicate_twin_ibd1_min: float = -0.15,
+    duplicate_twin_ibd1_max: float = 0.1,
+    ibd1_expr: Optional[hl.expr.NumericExpression] = None,
+):
+    """
+    Return an expression indicating the relationship between a pair of samples given slope and intercept cutoffs.
+
+    The kinship coefficient (`kin_expr`) and an additional metric (`y_expr`) are used
+    to define the relationship between a pair of samples. For this function the
+    slope and intercepts should refer to cutoff lines where the x-axis, or independent
+    variable is the kinship coefficient and the y-axis, or dependent variable, is
+    the metric defined by `y_expr`. Typically, the y-axis metric IBS0, IBS0/IBS2, or
+    IBD0.
+
+    .. note::
+
+        No defaults are provided for the slope and intercept cutoffs because they are
+        highly dependent on the dataset and the metric used in `y_expr`.
+
+    The relationship expression is determined as follows:
+        - If `kin_expr` < `second_degree_min_kin` ->  UNRELATED
+        - If `kin_expr` > `duplicate_twin_min_kin`:
+            - If `y_expr` < `parent_child_max_y`:
+                - If `ibd1_expr` is defined:
+                    - If `duplicate_twin_ibd1_min` <= `ibd1_expr` <= `
+                      duplicate_twin_ibd1_max` -> DUPLICATE_OR_TWINS
+                    - Else -> AMBIGUOUS_RELATIONSHIP
+                - Else -> DUPLICATE_OR_TWINS
+        - If `y_expr` < `parent_child_max_y` -> PARENT_CHILD
+        - If pair is over second_degree_sibling_lower_cutoff line:
+            - If pair is over second_degree_upper_sibling_lower_cutoff line -> SIBLINGS
+            - Else -> SECOND_DEGREE_RELATIVES
+        - If none of the above conditions are met -> AMBIGUOUS_RELATIONSHIP
+
+    :param kin_expr: Kin coefficient expression. Used as the x-axis, or independent
+        variable, for the slope and intercept cutoffs.
+    :param y_expr: Expression for the metric to use as the y-axis, or dependent
+        variable, for the slope and intercept cutoffs. This is typically an expression
+        for IBS0, IBS0/IBS2, or IBD0.
+    :param parent_child_max_y: Maximum value of the metric defined by `y_expr` for a
+        parent-child pair.
+    :param second_degree_sibling_lower_cutoff_slope: Slope of the line to use as a
+        lower cutoff for second degree relatives and siblings from parent-child pairs.
+    :param second_degree_sibling_lower_cutoff_intercept: Intercept of the line to use
+        as a lower cutoff for second degree relatives and siblings from parent-child
+        pairs.
+    :param second_degree_upper_sibling_lower_cutoff_slope: Slope of the line to use as
+        an upper cutoff for second degree relatives and a lower cutoff for siblings.
+    :param second_degree_upper_sibling_lower_cutoff_intercept: Intercept of the line to
+        use as an upper cutoff for second degree relatives and a lower cutoff for
+        siblings.
+    :param duplicate_twin_min_kin: Minimum kinship for duplicate or twin pairs.
+        Default is 0.42.
+    :param second_degree_min_kin: Minimum kinship threshold for 2nd degree relatives.
+        Default is 0.08838835. Bycroft et al. (2018) calculates a theoretical kinship
+        of 0.08838835 for a second degree relationship cutoff, but this cutoff should be
+        determined by evaluation of the kinship distribution.
+    :param ibd1_expr: Optional IBD1 expression. If this expression is provided,
+        `duplicate_twin_ibd1_min` and `duplicate_twin_ibd1_max` will be used as an
+        additional cutoff for duplicate or twin pairs.
+    :param duplicate_twin_ibd1_min: Minimum IBD1 cutoff for duplicate or twin pairs.
+        Note: the min is because pc_relate can output large negative values in some
+        corner cases.
+    :param duplicate_twin_ibd1_max: Maximum IBD1 cutoff for duplicate or twin pairs.
+    :return: The relationship annotation using the constants defined in this module.
+    """
+    # Only use a duplicate/twin IBD1 cutoff if an ibd1_expr is supplied.
+    if ibd1_expr is not None:
+        dup_twin_ibd1_expr = (ibd1_expr >= duplicate_twin_ibd1_min) & (
+            ibd1_expr <= duplicate_twin_ibd1_max
+        )
+    else:
+        dup_twin_ibd1_expr = True
+
+    return (
+        hl.case()
+        .when(kin_expr < second_degree_min_kin, UNRELATED)
+        .when(
+            kin_expr > duplicate_twin_min_kin,
+            hl.if_else(
+                dup_twin_ibd1_expr & (y_expr < parent_child_max_y),
+                DUPLICATE_OR_TWINS,
+                AMBIGUOUS_RELATIONSHIP,
+            ),
+        )
+        .when(y_expr < parent_child_max_y, PARENT_CHILD)
+        .when(
+            y_expr
+            > second_degree_sibling_lower_cutoff_slope * kin_expr
+            + second_degree_sibling_lower_cutoff_intercept,
+            hl.if_else(
+                y_expr
+                > second_degree_upper_sibling_lower_cutoff_slope * kin_expr
+                + second_degree_upper_sibling_lower_cutoff_intercept,
+                SIBLINGS,
+                SECOND_DEGREE_RELATIVES,
+            ),
+        )
+        .default(AMBIGUOUS_RELATIONSHIP)
+    )
+
+
 def infer_families(
     relationship_ht: hl.Table,
     sex: Union[hl.Table, Dict[str, bool]],
@@ -578,27 +690,48 @@ def create_fake_pedigree(
     exclude_real_probands: bool = False,
     max_tries: int = 10,
     real_pedigree: Optional[hl.Pedigree] = None,
+    sample_list_stratification: Optional[Dict[str, str]] = None,
 ) -> hl.Pedigree:
     """
     Generate a pedigree made of trios created by sampling 3 random samples in the sample list.
 
-    - If `real_pedigree` is given, then children in the resulting fake trios will not include any trio with proband - parents
-      that are in the real ones.
+    - If `real_pedigree` is given, then children in the resulting fake trios will not
+      include any trio with proband - parents that are in the real ones.
     - Each sample can be used only once as a proband in the resulting trios.
     - Sex of probands in fake trios is random.
 
-    :param n: Number of fake trios desired in the pedigree
-    :param sample_list: List of samples
-    :param exclude_real_probands: If set, then fake trios probands cannot be in the real trios probands.
-    :param max_tries: Maximum number of sampling to try before bailing out (preventing infinite loop if `n` is too large w.r.t. the number of samples)
-    :param real_pedigree: Optional pedigree to exclude children from
-    :return: Fake pedigree
+    :param n: Number of fake trios desired in the pedigree.
+    :param sample_list: List of samples.
+    :param exclude_real_probands: If set, then fake trios probands cannot be in the
+        real trios probands.
+    :param max_tries: Maximum number of sampling to try before bailing out (preventing
+        infinite loop if `n` is too large w.r.t. the number of samples).
+    :param real_pedigree: Optional pedigree to exclude children from.
+    :param sample_list_stratification: Optional dictionary with samples as keys and
+        a value that should be used to stratify samples in `sample_list` into groups
+        that the trio should be picked from. This ensures that each fake trio will
+        contain samples from only the same stratification. For example, if all samples
+        within a fake trio should be chosen from the same platform, this can be a
+        dictionary of sample: platform.
+    :return: Fake pedigree.
     """
     real_trios = (
         {trio.s: trio for trio in real_pedigree.trios}
         if real_pedigree is not None
         else dict()
     )
+
+    if sample_list_stratification is not None:
+        sample_list_stratified = defaultdict(list)
+        for s in sample_list:
+            s_strata = sample_list_stratification.get(s)
+            if s_strata is None:
+                raise ValueError(
+                    f"Sample {s} not found in 'sample_list_stratification' dict!"
+                )
+            sample_list_stratified[s_strata].append(s)
+    else:
+        sample_list_stratified = None
 
     if exclude_real_probands and len(real_trios) == len(set(sample_list)):
         logger.warning(
@@ -610,7 +743,13 @@ def create_fake_pedigree(
     fake_trios = {}
     tries = 0
     while len(fake_trios) < n and tries < max_tries:
-        s, mat_id, pat_id = random.sample(sample_list, 3)
+        s = random.choice(sample_list)
+        if sample_list_stratified is None:
+            curr_sample_list = sample_list
+        else:
+            curr_sample_list = sample_list_stratified[sample_list_stratification[s]]
+
+        mat_id, pat_id = random.sample(curr_sample_list, 2)
         if (
             s in real_trios
             and (
@@ -681,7 +820,7 @@ def compute_related_samples_to_drop(
             "Computing samples related to too many individuals (>%d) for exclusion",
             min_related_hard_filter,
         )
-        gbi = relatedness_ht.annotate(s=list(relatedness_ht.key))
+        gbi = relatedness_ht.annotate(s=[relatedness_ht.key[0], relatedness_ht.key[1]])
         gbi = gbi.explode(gbi.s)
         gbi = gbi.group_by(gbi.s).aggregate(n=hl.agg.count())
         filtered_samples_rel = gbi.aggregate(
@@ -698,7 +837,7 @@ def compute_related_samples_to_drop(
             relatedness_ht.aggregate(
                 hl.agg.explode(
                     lambda s: hl.agg.collect_as_set(s),
-                    hl.array(list(relatedness_ht.key)).filter(
+                    hl.array([relatedness_ht.key[0], relatedness_ht.key[1]]).filter(
                         lambda s: filtered_samples.contains(s)
                     ),
                 )
@@ -832,7 +971,8 @@ def compute_related_samples_to_drop(
         related_samples_to_drop_ht = hl.Table.parallelize(
             maximal_independent_set_keep_samples(
                 related_pair_graph, keep=hl.eval(keep_samples)
-            )
+            ),
+            hl.tstruct(s=hl.tstr, rank=hl.tint64),
         )
     related_samples_to_drop_ht = related_samples_to_drop_ht.key_by("s")
 
@@ -957,7 +1097,7 @@ def generate_trio_stats_expr(
                 locus.in_autosome(),
                 proband_gt.is_het() & father_gt.is_hom_ref() & mother_gt.is_hom_ref(),
             )
-        return hl.cond(
+        return hl.if_else(
             locus.in_autosome_or_par() | (proband_is_female & locus.in_x_nonpar()),
             proband_gt.is_het() & father_gt.is_hom_ref() & mother_gt.is_hom_ref(),
             hl.or_missing(

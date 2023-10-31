@@ -1,106 +1,20 @@
 # noqa: D100
 
-import asyncio
 import base64
 import gzip
 import logging
 import os
 import subprocess
 import uuid
-from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import hail as hl
-from hailtop.aiogoogle import GoogleStorageAsyncFS
-from hailtop.aiotools import AsyncFS, LocalAsyncFS
-from hailtop.aiotools.router_fs import RouterAsyncFS
-from hailtop.utils import bounded_gather
-from hailtop.utils.rich_progress_bar import SimpleRichProgressBar
 
 from gnomad.resources.resource_utils import DataException
 
 logging.basicConfig(format="%(levelname)s (%(name)s %(lineno)s): %(message)s")
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-
-async def parallel_file_exists_async(
-    fpaths: List[str], parallelism: int = 750
-) -> Dict[str, bool]:
-    """
-    Check whether a large number of files exist.
-
-    Created for use with hail Batch jobs.
-    Normal `file_exists` function is very slow when checking a large number of files.
-
-    :param fpaths: List of file paths to check. Files can be in local or Google cloud storage.
-    :param parallelism: Integer that sets parallelism of file existence checking task. Default is 750.
-    :return: Dictionary of file paths (str) and whether the file exists (boolean).
-    """
-
-    async def async_file_exists(fs: AsyncFS, fpath: str) -> bool:
-        """
-        Determine file existence.
-
-        :param fs: AsyncFS object.
-        :param fpath: Path to file to check.
-        :return: Whether file exists.
-        """
-        fext = os.path.splitext(fpath)[1]
-        if fext in [".ht", ".mt"]:
-            fpath += "/_SUCCESS"
-        try:
-            await fs.statfile(fpath)
-        except FileNotFoundError:
-            return False
-        else:
-            return True
-
-    with SimpleRichProgressBar(
-        total=len(fpaths), description="check files for existence", disable=False
-    ) as pbar:
-        with ThreadPoolExecutor() as thread_pool:
-            async with RouterAsyncFS(
-                "file", filesystems=[LocalAsyncFS(thread_pool), GoogleStorageAsyncFS()]
-            ) as fs:
-
-                def check_existence_and_update_pbar_thunk(fpath: str) -> Callable:
-                    """
-                    Create function to check if file exists and update progress bar in stdout.
-
-                    Function delays coroutine creation to avoid creating too many live coroutines.
-
-                    :param fpath: Path to file to check.
-                    :return: Function that checks for file existence and updates progress bar.
-                    """
-
-                    async def unapplied_function():
-                        x = await async_file_exists(fs, fpath)
-                        pbar.update(1)
-                        return x
-
-                    return unapplied_function
-
-                file_existence_checks = [
-                    check_existence_and_update_pbar_thunk(fpath) for fpath in fpaths
-                ]
-                file_existence = await bounded_gather(
-                    *file_existence_checks, parallelism=parallelism
-                )
-    return dict(zip(fpaths, file_existence))
-
-
-def parallel_file_exists(fpaths: List[str], parallelism: int = 750) -> Dict[str, bool]:
-    """
-    Call `parallel_file_exists_async` to check whether large number of files exist.
-
-    :param fpaths: List of file paths to check. Files can be in local or Google cloud storage.
-    :param parallelism: Integer that sets parallelism of file existence checking task. Default is 750.
-    :return: Dictionary of file paths (str) and whether the file exists (boolean).
-    """
-    return asyncio.get_event_loop().run_until_complete(
-        parallel_file_exists_async(fpaths, parallelism)
-    )
 
 
 def file_exists(fname: str) -> bool:
@@ -280,3 +194,31 @@ def read_list_data(input_file_path: str) -> List[str]:
         output.append(line.strip())
     f.close()
     return output
+
+
+def repartition_for_join(
+    ht_path: str,
+    new_partition_percent: float = 1.1,
+) -> List[hl.expr.IntervalExpression]:
+    """
+    Calculate new partition intervals using input Table.
+
+    Reading in all Tables using the same partition intervals (via
+    `_intervals`) before they are joined makes the joins much more efficient.
+    For more information, see:
+    https://discuss.hail.is/t/room-for-improvement-when-joining-multiple-hts/2278/8
+
+    :param ht_path: Path to Table to use for interval partition calculation.
+    :param new_partition_percent: Percent of initial dataset partitions to use.
+        Value should be greater than 1 so that input Table will have more
+        partitions for the join. Defaults to 1.1.
+    :return: List of IntervalExpressions calculated over new set of partitions
+        (number of partitions in HT * desired percent increase).
+    """
+    ht = hl.read_table(ht_path)
+    if new_partition_percent < 1:
+        logger.warning(
+            "new_partition_percent value is less than 1! The new HT will have fewer"
+            " partitions than the original HT!"
+        )
+    return ht._calculate_new_partitions(ht.n_partitions() * new_partition_percent)
