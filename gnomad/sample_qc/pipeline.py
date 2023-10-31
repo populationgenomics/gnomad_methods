@@ -4,7 +4,7 @@ import functools
 import logging
 import operator
 import os
-from typing import List, Optional, Union, TypeVar
+from typing import List, Optional, TypeVar, Union
 
 import hail as hl
 
@@ -19,10 +19,10 @@ from gnomad.utils.annotations import (
     bi_allelic_site_inbreeding_expr,
     get_adj_expr,
 )
+from gnomad.utils.file_utils import file_exists
 from gnomad.utils.filtering import filter_low_conf_regions, filter_to_adj
 from gnomad.utils.reference_genome import get_reference_genome
 from gnomad.utils.sparse_mt import impute_sex_ploidy
-from gnomad.utils.file_utils import file_exists
 
 logging.basicConfig(format="%(levelname)s (%(name)s %(lineno)s): %(message)s")
 logger = logging.getLogger(__name__)
@@ -387,7 +387,7 @@ def can_reuse(path: str, overwrite: bool = False) -> bool:
     if overwrite:
         return False
     if file_exists(path):
-        logger.info(f"Reusing checkpoint {path}")
+        logger.info(f"Reusing checkpoint {path}")  # pylint: disable=W1203
         return True
     return False
 
