@@ -381,9 +381,7 @@ def infer_sex_karyotype(
 
 
 def can_reuse(path: str, overwrite: bool = False) -> bool:
-    """
-    Check if a file at `path` exists and can be reused.
-    """
+    """Check if a file at `path` exists and can be reused."""
     if overwrite:
         return False
     if file_exists(path):
@@ -396,9 +394,7 @@ T = TypeVar("T", str, None)
 
 
 def checkpoint_path(tmp_prefix: T, name: str) -> T:
-    """
-    Path to save and read checkpoints.
-    """
+    """Path to save and read checkpoints."""
     if tmp_prefix:
         return os.path.join(tmp_prefix, f"{name}.ht")
     else:
