@@ -4,7 +4,7 @@ import functools
 import logging
 import operator
 import os
-from typing import List, Optional, Union, TypeVar
+from typing import List, Optional, Union
 
 import hail as hl
 
@@ -19,10 +19,10 @@ from gnomad.utils.annotations import (
     bi_allelic_site_inbreeding_expr,
     get_adj_expr,
 )
+from gnomad.utils.file_utils import file_exists
 from gnomad.utils.filtering import filter_low_conf_regions, filter_to_adj
 from gnomad.utils.reference_genome import get_reference_genome
 from gnomad.utils.sparse_mt import impute_sex_ploidy
-from gnomad.utils.file_utils import file_exists
 
 logging.basicConfig(format="%(levelname)s (%(name)s %(lineno)s): %(message)s")
 logger = logging.getLogger(__name__)
@@ -383,23 +383,27 @@ def infer_sex_karyotype(
 def can_reuse(path: str, overwrite: bool = False) -> bool:
     """
     Check if a file at `path` exists and can be reused.
+
+    :param path:
+    :param overwrite:
     """
     if overwrite:
         return False
     if file_exists(path):
-        logger.info(f"Reusing checkpoint {path}")
+        logger.info("Reusing checkpoint %s", path)
         return True
     return False
 
 
-T = TypeVar("T", str, None)
-
-def checkpoint_path(tmp_prefix: T, name: str) -> T:
+def checkpoint_path(tmp_prefix: Optional[str], name: str) -> Optional[str]:
     """
     Path to save and read checkpoints.
+
+    :param tmp_prefix:
+    :param name:
     """
     if tmp_prefix:
-        return os.path.join(tmp_prefix, f"{name}.ht")
+        return os.path.join(tmp_prefix, name)
     else:
         return None
 
@@ -510,8 +514,8 @@ def annotate_sex(
                 )
             if included_intervals is None:
                 raise NotImplementedError(
-                    "The current implementation for imputing sex chromosome ploidy on a"
-                    " VDS requires a list of 'included_intervals'!"
+                    "The current implementation for imputing sex chromosome ploidy on a VDS"
+                    " requires a list of 'included_intervals'!"
                 )
             mt = mtds.variant_data
         else:
@@ -605,8 +609,8 @@ def annotate_sex(
         if compute_x_frac_variants_hom_alt or var_keep_contigs:
             logger.info(
                 "Filtering variants for variant only sex chromosome ploidy imputation"
-                " and/or computation of the fraction of homozygous alternate variants"
-                " on chromosome X",
+                " and/or computation of the fraction of homozygous alternate variants on"
+                " chromosome X",
             )
             filtered_mt = hl.filter_intervals(
                 mt, var_keep_locus_intervals + x_locus_intervals
@@ -639,8 +643,8 @@ def annotate_sex(
 
         if var_keep_contigs:
             logger.info(
-                "Imputing sex chromosome ploidy using only variant depth information on"
-                " the following contigs: %s",
+                "Imputing sex chromosome ploidy using only variant depth information on the"
+                " following contigs: %s",
                 var_keep_contigs,
             )
             var_filtered_mt = hl.filter_intervals(filtered_mt, var_keep_locus_intervals)
@@ -738,8 +742,8 @@ def annotate_sex(
             if sites_ht is not None:
                 if aaf_expr is None:
                     logger.warning(
-                        "sites_ht was provided, but aaf_expr is missing. Assuming name"
-                        " of field with alternate allele frequency is 'AF'."
+                        "sites_ht was provided, but aaf_expr is missing. Assuming name of"
+                        " field with alternate allele frequency is 'AF'."
                     )
                     aaf_expr = "AF"
                 logger.info("Filtering to provided sites")
