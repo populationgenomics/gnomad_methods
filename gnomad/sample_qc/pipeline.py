@@ -496,70 +496,71 @@ def annotate_sex(
     :return: Table of samples and their imputed sex karyotypes.
     """
     logger.info("Imputing sex chromosome ploidies...")
+
+    if infer_karyotype and not (compute_fstat or use_gaussian_mixture_model):
+        raise ValueError(
+            "In order to infer sex karyotype (infer_karyotype=True), one of"
+            " 'compute_fstat' or 'use_gaussian_mixture_model' must be set to True!"
+        )
+
+    is_vds = isinstance(mtds, hl.vds.VariantDataset)
+    if is_vds:
+        if excluded_intervals is not None:
+            raise NotImplementedError(
+                "The use of the parameter 'excluded_intervals' is currently not"
+                " implemented for imputing sex chromosome ploidy on a VDS!"
+            )
+        if included_intervals is None:
+            raise NotImplementedError(
+                "The current implementation for imputing sex chromosome ploidy on a VDS"
+                " requires a list of 'included_intervals'!"
+            )
+        mt = mtds.variant_data
+    else:
+        if not is_sparse:
+            raise NotImplementedError(
+                "Imputing sex ploidy does not exist yet for dense data."
+            )
+        mt = mtds
+
+    # Determine the contigs that are needed for variant only and reference
+    # block only sex ploidy imputation
+    rg = get_reference_genome(mt.locus)
+    if normalization_contig not in rg.contigs:
+        raise ValueError(
+            f"Normalization contig {normalization_contig} is not found in reference"
+            f" genome {rg.name}!"
+        )
+
+    x_contigs = set(rg.x_contigs)
+    y_contigs = set(rg.y_contigs)
+    if variants_only_x_ploidy:
+        var_keep_contigs = x_contigs | {normalization_contig}
+        ref_keep_contigs = set()
+    else:
+        ref_keep_contigs = x_contigs | {normalization_contig}
+        var_keep_contigs = set()
+    if variants_only_y_ploidy:
+        var_keep_contigs = {normalization_contig} | var_keep_contigs | y_contigs
+    else:
+        ref_keep_contigs = {normalization_contig} | ref_keep_contigs | y_contigs
+
+    ref_keep_locus_intervals = [
+        hl.parse_locus_interval(contig, reference_genome=rg.name)
+        for contig in ref_keep_contigs
+    ]
+    var_keep_locus_intervals = [
+        hl.parse_locus_interval(contig, reference_genome=rg.name)
+        for contig in var_keep_contigs
+    ]
+    x_locus_intervals = [
+        hl.parse_locus_interval(contig, reference_genome=rg.name)
+        for contig in x_contigs
+    ]
+
     if (path := checkpoint_path(tmp_prefix, "ploidy.ht")) and can_reuse(path, overwrite):
         ploidy_ht = hl.read_table(path)
     else:
-        if infer_karyotype and not (compute_fstat or use_gaussian_mixture_model):
-            raise ValueError(
-                "In order to infer sex karyotype (infer_karyotype=True), one of"
-                " 'compute_fstat' or 'use_gaussian_mixture_model' must be set to True!"
-            )
-
-        is_vds = isinstance(mtds, hl.vds.VariantDataset)
-        if is_vds:
-            if excluded_intervals is not None:
-                raise NotImplementedError(
-                    "The use of the parameter 'excluded_intervals' is currently not"
-                    " implemented for imputing sex chromosome ploidy on a VDS!"
-                )
-            if included_intervals is None:
-                raise NotImplementedError(
-                    "The current implementation for imputing sex chromosome ploidy on a VDS"
-                    " requires a list of 'included_intervals'!"
-                )
-            mt = mtds.variant_data
-        else:
-            if not is_sparse:
-                raise NotImplementedError(
-                    "Imputing sex ploidy does not exist yet for dense data."
-                )
-            mt = mtds
-
-        # Determine the contigs that are needed for variant only and reference
-        # block only sex ploidy imputation
-        rg = get_reference_genome(mt.locus)
-        if normalization_contig not in rg.contigs:
-            raise ValueError(
-                f"Normalization contig {normalization_contig} is not found in reference"
-                f" genome {rg.name}!"
-            )
-
-        x_contigs = set(rg.x_contigs)
-        y_contigs = set(rg.y_contigs)
-        if variants_only_x_ploidy:
-            var_keep_contigs = x_contigs | {normalization_contig}
-            ref_keep_contigs = set()
-        else:
-            ref_keep_contigs = x_contigs | {normalization_contig}
-            var_keep_contigs = set()
-        if variants_only_y_ploidy:
-            var_keep_contigs = {normalization_contig} | var_keep_contigs | y_contigs
-        else:
-            ref_keep_contigs = {normalization_contig} | ref_keep_contigs | y_contigs
-
-        ref_keep_locus_intervals = [
-            hl.parse_locus_interval(contig, reference_genome=rg.name)
-            for contig in ref_keep_contigs
-        ]
-        var_keep_locus_intervals = [
-            hl.parse_locus_interval(contig, reference_genome=rg.name)
-            for contig in var_keep_contigs
-        ]
-        x_locus_intervals = [
-            hl.parse_locus_interval(contig, reference_genome=rg.name)
-            for contig in x_contigs
-        ]
-
         if ref_keep_contigs:
             logger.info(
                 "Imputing sex chromosome ploidy using only reference block depth"
