@@ -773,21 +773,46 @@ def annotate_sex(
             ploidy_ht = ploidy_ht.annotate_globals(f_stat_cutoff=f_stat_cutoff)
             logger.info(f"Annotated fstat_cutoff {f_stat_cutoff}")
             if path:
+                logger.info(f"path: {path}")
+                logger.info(f"About to save ploidy_ht checkpoint: {ploidy_ht}")
                 ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
+                logger.info(f"Saved ploidy_ht checkpoint: {ploidy_ht}")
 
     if infer_karyotype:
         logger.info("infer_karyotype")
+        logger.info(
+            "Setting infer_karyotype path if file infer_karyotype.ht exists:"
+            f" {checkpoint_path(tmp_prefix, 'infer_karyotype.ht')}   "
+        )
         if (path := checkpoint_path(tmp_prefix, "infer_karyotype.ht")) and can_reuse(
             path, overwrite
         ):
+            logger.info(
+                "infer_karyotype.ht exists and reading as variable `ploidy_ht` it from"
+                f" path: {path}"
+            )
             ploidy_ht = hl.read_table(path)
+            logger.info(f"ploidy_ht read from path: {path}")
         else:
+            logger.info(f"infer_karyotype doesn't exist, generating karyotype_ht")
             karyotype_ht = infer_sex_karyotype(
                 ploidy_ht, f_stat_cutoff, use_gaussian_mixture_model
             )
+            logger.info(f"karyotpype_ht generated: {karyotype_ht}")
+            logger.info(
+                f"About to annotate ploidy_ht with karyotype_ht: {karyotype_ht.key}"
+            )
             ploidy_ht = ploidy_ht.annotate(**karyotype_ht[ploidy_ht.key])
+            logger.info(f"Annotated ploidy_ht with karyotype_ht: {karyotype_ht.key}")
+            logger.info(
+                f"About to annotate ploidy_ht globals with karyotype_ht globals"
+            )
             ploidy_ht = ploidy_ht.annotate_globals(**karyotype_ht.index_globals())
+            logger.info(f"Annotated ploidy_ht globals with karyotype_ht globals")
             if path:
+                logger.info(f"path: {path}")
+                logger.info(f"About to save ploidy_ht checkpoint: {ploidy_ht}")
                 ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
+                logger.info(f"Saved ploidy_ht checkpoint: {ploidy_ht}")
 
     return ploidy_ht
