@@ -775,7 +775,7 @@ def annotate_sex(
             if path:
                 logger.info(f"path: {path}")
                 logger.info(f"About to save ploidy_ht checkpoint: {ploidy_ht}")
-                ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
+                # ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
                 logger.info(f"Saved ploidy_ht checkpoint: {ploidy_ht}")
 
     if infer_karyotype:
@@ -812,7 +812,7 @@ def annotate_sex(
             if path:
                 logger.info(f"path: {path}")
                 logger.info(f"About to save ploidy_ht checkpoint: {ploidy_ht}")
-                ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
+                # ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
                 logger.info(f"Saved ploidy_ht checkpoint: {ploidy_ht}")
 
     return ploidy_ht
