@@ -774,9 +774,9 @@ def annotate_sex(
             logger.info(f"Annotated fstat_cutoff {f_stat_cutoff}")
             if path:
                 logger.info(f"path: {path}")
-                logger.info(f"About to save ploidy_ht checkpoint: {ploidy_ht}")
+                logger.info(f"About to skip saving ploidy_ht checkpoint: {ploidy_ht}")
                 # ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
-                logger.info(f"Saved ploidy_ht checkpoint: {ploidy_ht}")
+                logger.info(f"Skipped saving ploidy_ht checkpoint: {ploidy_ht}")
 
     if infer_karyotype:
         logger.info("infer_karyotype")
@@ -811,8 +811,8 @@ def annotate_sex(
             logger.info(f"Annotated ploidy_ht globals with karyotype_ht globals")
             if path:
                 logger.info(f"path: {path}")
-                logger.info(f"About to save ploidy_ht checkpoint: {ploidy_ht}")
+                logger.info(f"About to skip saving ploidy_ht checkpoint: {ploidy_ht}")
                 # ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
-                logger.info(f"Saved ploidy_ht checkpoint: {ploidy_ht}")
+                logger.info(f"Skipped saving ploidy_ht checkpoint: {ploidy_ht}")
 
     return ploidy_ht
