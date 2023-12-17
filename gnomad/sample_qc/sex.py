@@ -204,16 +204,24 @@ def get_ploidy_cutoffs(
 
     # If 'f_stat_cutoff' is supplied, group the sex chromosome ploidy table by
     # f_stat cutoff
+    logger.info(f"f_stat_cutoff: {f_stat_cutoff}")
     if f_stat_cutoff is not None:
+        logger.info(
+            f"f_stat_cutoff is supplied group the sex chromosome ploidy table by f_stat"
+            f" cutoff"
+        )
         group_by_expr = hl.if_else(ht.f_stat < f_stat_cutoff, "XX", "XY")
+        logger.info(f"group_by_expr: {group_by_expr}")
 
     # Get mean/stdev for chrX/Y ploidies based on 'group_by_expr'
+    logger.info(f"getting sex_stats")
     sex_stats = ht.aggregate(
         hl.agg.group_by(
             group_by_expr,
             hl.struct(x=hl.agg.stats(ht.chrX_ploidy), y=hl.agg.stats(ht.chrY_ploidy)),
         )
     )
+    logger.info(f"sex_stats generated: {sex_stats}")
     if "XX" not in sex_stats:
         raise ValueError("No samples are grouped as XX!")
     if "XY" not in sex_stats:
@@ -221,6 +229,7 @@ def get_ploidy_cutoffs(
     logger.info("XX stats: %s", sex_stats["XX"])
     logger.info("XY stats: %s", sex_stats["XY"])
 
+    logger.info("About to set cutoffs")
     cutoffs = (
         (
             sex_stats["XY"].x.mean + (normal_ploidy_cutoff * sex_stats["XY"].x.stdev),

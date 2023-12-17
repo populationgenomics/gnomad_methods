@@ -314,6 +314,9 @@ def infer_sex_karyotype(
             aneuploidy_cutoff=aneuploidy_cutoff,
         )
         group_by_expr = None
+        logger.info(
+            f"Calculated X and Y ploidy cutoffs: {x_ploidy_cutoffs}, {y_ploidy_cutoffs}"
+        )
 
     if chr_x_frac_hom_alt_expr is not None:
         logger.info(
@@ -334,6 +337,7 @@ def infer_sex_karyotype(
     else:
         chr_x_frac_hom_alt_cutoffs = None
 
+    logger.info(f"Creating karyotype_ht variable with sex cutoffs")
     karyotype_ht = ploidy_ht.select(
         **get_sex_expr(
             ploidy_ht.chrX_ploidy,
@@ -344,6 +348,8 @@ def infer_sex_karyotype(
             chr_x_frac_hom_alt_cutoffs=chr_x_frac_hom_alt_cutoffs,
         )
     )
+    logger.info(f"Created karyotype_ht variable with sex cutoffs")
+    logger.info(f"About to annotate karyotpype_ht with globals")
     karyotype_ht = karyotype_ht.annotate_globals(
         use_gaussian_mixture_model=use_gaussian_mixture_model,
         normal_ploidy_cutoff=normal_ploidy_cutoff,
@@ -360,6 +366,7 @@ def infer_sex_karyotype(
             lower_cutoff_YY=y_ploidy_cutoffs[1],
         ),
     )
+    logger.info(f"Annotated karyotpype_ht with globals")
     if chr_x_frac_hom_alt_expr is not None:
         karyotype_ht = karyotype_ht.annotate_globals(
             x_frac_hom_alt_cutoffs=hl.struct(
@@ -369,12 +376,20 @@ def infer_sex_karyotype(
             )
         )
 
+    logger.info(
+        f"Should be skipping annotating karytoype_ht with use_gaussian_mixture_model"
+    )
     if use_gaussian_mixture_model:
         karyotype_ht = karyotype_ht.annotate(
             gmm_sex_karyotype=ploidy_ht[karyotype_ht.key].gmm_karyotype
         )
     else:
+        logger.info(f"Skipped annotating karytoype_ht with use_gaussian_mixture_model")
+        logger.info(
+            f"About to annotate karyotpype_ht with f_stat_cutoff: {f_stat_cutoff}"
+        )
         karyotype_ht = karyotype_ht.annotate_globals(f_stat_cutoff=f_stat_cutoff)
+        logger.info(f"Annotated karyotpype_ht with f_stat_cutoff: {f_stat_cutoff}")
 
     return karyotype_ht
 
