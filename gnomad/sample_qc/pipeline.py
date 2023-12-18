@@ -538,7 +538,7 @@ def annotate_sex(
         mt = mtds
     mt.show()
     mt.write(
-        tmp_prefix / "sample_qc" / "annotation" / "annotate_sex_something.mt",
+        tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_something.mt",
         overwrite=True,
     )
     # Determine the contigs that are needed for variant only and reference
@@ -613,7 +613,7 @@ def annotate_sex(
                 ploidy_ht.show()
                 ploidy_ht.write(
                     tmp_prefix
-                    / "sample_qc"
+                    / "sample_qc2"
                     / "annotation"
                     / "annotate_sex_ploidy_ht.ht",
                     overwrite=True,
@@ -629,7 +629,7 @@ def annotate_sex(
             logger.info("ploidy_ht.ht after being written (after renaming sex labels)")
             ploidy_ht.show()
             ploidy_ht.write(
-                tmp_prefix / "sample_qc" / "annotation" / "annotate_sex_ploidy_ht.ht",
+                tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_ploidy_ht.ht",
                 overwrite=True,
             )
         else:
@@ -647,7 +647,7 @@ def annotate_sex(
     logger.info("Checkpoint after creating ploidy_ht.ht")
     ploidy_ht.show()
     ploidy_ht.checkpoint(
-        tmp_prefix / "sample_qc" / "annotation" / "annotate_sex_ploidy_ht.ht",
+        tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_ploidy_ht.ht",
         overwrite=True,
     )
     add_globals = hl.struct()
@@ -696,7 +696,10 @@ def annotate_sex(
         logger.info("var_filtered_mt creation")
         var_filtered_mt.show()
         var_filtered_mt.write(
-            tmp_prefix / "sample_qc" / "annotation" / "annotate_sex_var_filtered_mt.mt",
+            tmp_prefix
+            / "sample_qc2"
+            / "annotation"
+            / "annotate_sex_var_filtered_mt.mt",
             overwrite=True,
         )
 
@@ -754,7 +757,7 @@ def annotate_sex(
     logger.info("ploidy_ht before annotating global")
     ploidy_ht.show()
     ploidy_ht.write(
-        tmp_prefix / "sample_qc" / "annotation" / "annotate_sex_ploidy.ht",
+        tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_ploidy.ht",
         overwrite=True,
     )
     ploidy_ht = ploidy_ht.annotate_globals(
@@ -838,7 +841,7 @@ def annotate_sex(
         logger.info("sex_ht creation")
         sex_ht.show()
         sex_ht.write(
-            tmp_prefix / "sample_qc" / "annotation" / "annotate_sex_sex_ht.ht",
+            tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_sex_ht.ht",
             overwrite=True,
         )
 
