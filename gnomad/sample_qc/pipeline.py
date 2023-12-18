@@ -170,7 +170,7 @@ def get_qc_mt(
     :param block_size: If given, set the block size to this value when LD pruning.
     :return: Filtered MT.
     """
-    logger.info("Creating QC MatrixTable")
+    logging.info("Creating QC MatrixTable")
     if ld_r2 is not None:
         logger.warning(
             "The LD-prune step of this function requires non-preemptible workers only!"
@@ -207,16 +207,16 @@ def get_qc_mt(
     if ld_r2 is not None:
         if checkpoint_path:
             if n_partitions:
-                logger.info("Checkpointing and repartitioning the MT and LD pruning")
+                logging.info("Checkpointing and repartitioning the MT and LD pruning")
                 qc_mt.write(checkpoint_path, overwrite=True)
                 qc_mt = hl.read_matrix_table(
                     checkpoint_path, _n_partitions=n_partitions
                 )
             else:
-                logger.info("Checkpointing the MT and LD pruning")
+                logging.info("Checkpointing the MT and LD pruning")
                 qc_mt = qc_mt.checkpoint(checkpoint_path, overwrite=True)
         else:
-            logger.info("Persisting the MT and LD pruning")
+            logging.info("Persisting the MT and LD pruning")
             qc_mt = qc_mt.persist()
         unfiltered_qc_mt = qc_mt.unfilter_entries()
         pruned_ht = hl.ld_prune(unfiltered_qc_mt.GT, r2=ld_r2, block_size=block_size)
@@ -287,12 +287,12 @@ def infer_sex_karyotype(
         used if `chr_x_frac_hom_alt_expr` is supplied.
     :return: Table of samples imputed sex karyotype.
     """
-    logger.info("Inferring sex karyotype")
+    logging.info("Inferring sex karyotype")
     if chr_x_frac_hom_alt_expr is not None:
         ploidy_ht = ploidy_ht.annotate(_chr_x_frac_hom_alt=chr_x_frac_hom_alt_expr)
 
     if use_gaussian_mixture_model:
-        logger.info("Using Gaussian Mixture Model for karyotype assignment")
+        logging.info("Using Gaussian Mixture Model for karyotype assignment")
         gmm_sex_ht = gaussian_mixture_model_karyotype_assignment(ploidy_ht)
         x_ploidy_cutoffs, y_ploidy_cutoffs = get_ploidy_cutoffs(
             gmm_sex_ht,
@@ -306,7 +306,7 @@ def infer_sex_karyotype(
         group_by_expr = ploidy_ht.gmm_karyotype
         f_stat_cutoff = None
     else:
-        logger.info("Using f-stat for karyotype assignment")
+        logging.info("Using f-stat for karyotype assignment")
         x_ploidy_cutoffs, y_ploidy_cutoffs = get_ploidy_cutoffs(
             ploidy_ht,
             f_stat_cutoff=f_stat_cutoff,
@@ -314,12 +314,12 @@ def infer_sex_karyotype(
             aneuploidy_cutoff=aneuploidy_cutoff,
         )
         group_by_expr = None
-        logger.info(
+        logging.info(
             f"Calculated X and Y ploidy cutoffs: {x_ploidy_cutoffs}, {y_ploidy_cutoffs}"
         )
 
     if chr_x_frac_hom_alt_expr is not None:
-        logger.info(
+        logging.info(
             "Including cutoffs for the fraction of homozygous alternate genotypes"
             " (hom-alt/(hom-alt + het)) on chromosome X. Using %d standard deviations"
             " to determine cutoffs.",
@@ -337,7 +337,7 @@ def infer_sex_karyotype(
     else:
         chr_x_frac_hom_alt_cutoffs = None
 
-    logger.info(f"Creating karyotype_ht variable with sex cutoffs")
+    logging.info(f"Creating karyotype_ht variable with sex cutoffs")
     karyotype_ht = ploidy_ht.select(
         **get_sex_expr(
             ploidy_ht.chrX_ploidy,
@@ -348,8 +348,8 @@ def infer_sex_karyotype(
             chr_x_frac_hom_alt_cutoffs=chr_x_frac_hom_alt_cutoffs,
         )
     )
-    logger.info(f"Created karyotype_ht variable with sex cutoffs")
-    logger.info(f"About to annotate karyotpype_ht with globals")
+    logging.info(f"Created karyotype_ht variable with sex cutoffs")
+    logging.info(f"About to annotate karyotpype_ht with globals")
     karyotype_ht = karyotype_ht.annotate_globals(
         use_gaussian_mixture_model=use_gaussian_mixture_model,
         normal_ploidy_cutoff=normal_ploidy_cutoff,
@@ -366,7 +366,7 @@ def infer_sex_karyotype(
             lower_cutoff_YY=y_ploidy_cutoffs[1],
         ),
     )
-    logger.info(f"Annotated karyotpype_ht with globals")
+    logging.info(f"Annotated karyotpype_ht with globals")
     if chr_x_frac_hom_alt_expr is not None:
         karyotype_ht = karyotype_ht.annotate_globals(
             x_frac_hom_alt_cutoffs=hl.struct(
@@ -376,7 +376,7 @@ def infer_sex_karyotype(
             )
         )
 
-    logger.info(
+    logging.info(
         f"Should be skipping annotating karytoype_ht with use_gaussian_mixture_model"
     )
     if use_gaussian_mixture_model:
@@ -384,12 +384,12 @@ def infer_sex_karyotype(
             gmm_sex_karyotype=ploidy_ht[karyotype_ht.key].gmm_karyotype
         )
     else:
-        logger.info(f"Skipped annotating karytoype_ht with use_gaussian_mixture_model")
-        logger.info(
+        logging.info(f"Skipped annotating karytoype_ht with use_gaussian_mixture_model")
+        logging.info(
             f"About to annotate karyotpype_ht with f_stat_cutoff: {f_stat_cutoff}"
         )
         karyotype_ht = karyotype_ht.annotate_globals(f_stat_cutoff=f_stat_cutoff)
-        logger.info(f"Annotated karyotpype_ht with f_stat_cutoff: {f_stat_cutoff}")
+        logging.info(f"Annotated karyotpype_ht with f_stat_cutoff: {f_stat_cutoff}")
 
     return karyotype_ht
 
@@ -404,7 +404,7 @@ def can_reuse(path: str, overwrite: bool = False) -> bool:
     if overwrite:
         return False
     if file_exists(path):
-        logger.info("Reusing checkpoint %s", path)
+        logging.info("Reusing checkpoint %s", path)
         return True
     return False
 
@@ -509,7 +509,7 @@ def annotate_sex(
     :param overwrite: If a file at the checkpoint location exists, overwrite it.
     :return: Table of samples and their imputed sex karyotypes.
     """
-    logger.info("Imputing sex chromosome ploidies...")
+    logging.info("Imputing sex chromosome ploidies...")
 
     if infer_karyotype and not (compute_fstat or use_gaussian_mixture_model):
         raise ValueError(
@@ -575,7 +575,7 @@ def annotate_sex(
         hl.parse_locus_interval(contig, reference_genome=rg.name)
         for contig in x_contigs
     ]
-    logger.info(
+    logging.info(
         f"var_only_x_ploidy: {variants_only_x_ploidy}, ref_keep_contigs:"
         f" {ref_keep_contigs}, var_keep_contigs: {var_keep_contigs},"
         f" ref_keep_locus_intervals: {ref_keep_locus_intervals},"
@@ -586,7 +586,7 @@ def annotate_sex(
     #     ploidy_ht = hl.read_table(path)
     # else:
     if ref_keep_contigs:
-        logger.info(
+        logging.info(
             "Imputing sex chromosome ploidy using only reference block depth"
             " information on the following contigs: %s",
             ref_keep_contigs,
@@ -609,7 +609,7 @@ def annotate_sex(
                     normalization_contig=normalization_contig,
                     use_variant_dataset=False,
                 )
-                logger.info("ploidy_ht.ht creation (before renaming sex labels)")
+                logging.info("ploidy_ht.ht creation (before renaming sex labels)")
                 ploidy_ht.show()
                 ploidy_ht.write(
                     tmp_prefix
@@ -626,7 +626,7 @@ def annotate_sex(
                     "y_mean_dp": "chrY_mean_dp",
                 }
             )
-            logger.info("ploidy_ht.ht after being written (after renaming sex labels)")
+            logging.info("ploidy_ht.ht after being written (after renaming sex labels)")
             ploidy_ht.show()
             ploidy_ht.write(
                 tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_ploidy_ht.ht",
@@ -644,7 +644,7 @@ def annotate_sex(
             ploidy_ht = ploidy_ht.drop("chrX_ploidy", "chrX_mean_dp")
         if variants_only_y_ploidy:
             ploidy_ht = ploidy_ht.drop("chrY_ploidy", "chrY_mean_dp")
-    logger.info("Checkpoint after creating ploidy_ht.ht")
+    logging.info("Checkpoint after creating ploidy_ht.ht")
     ploidy_ht.show()
     ploidy_ht.checkpoint(
         tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_ploidy_ht.ht",
@@ -652,7 +652,7 @@ def annotate_sex(
     )
     add_globals = hl.struct()
     if compute_x_frac_variants_hom_alt or var_keep_contigs:
-        logger.info(
+        logging.info(
             "Filtering variants for variant only sex chromosome ploidy imputation"
             " and/or computation of the fraction of homozygous alternate variants on"
             " chromosome X",
@@ -661,7 +661,7 @@ def annotate_sex(
             mt, var_keep_locus_intervals + x_locus_intervals
         )
         if variants_filter_lcr or variants_filter_segdup or variants_filter_decoy:
-            logger.info(
+            logging.info(
                 "Filtering out variants in: %s",
                 ("segmental duplications, " if variants_filter_segdup else "")
                 + ("low confidence regions, " if variants_filter_lcr else "")
@@ -674,7 +674,7 @@ def annotate_sex(
                 filter_segdup=variants_filter_segdup,
             )
         if variants_snv_only:
-            logger.info("Filtering to SNVs")
+            logging.info("Filtering to SNVs")
             filtered_mt = filtered_mt.filter_rows(
                 hl.is_snp(filtered_mt.alleles[0], filtered_mt.alleles[1])
             )
@@ -687,13 +687,13 @@ def annotate_sex(
         )
 
     if var_keep_contigs:
-        logger.info(
+        logging.info(
             "Imputing sex chromosome ploidy using only variant depth information on the"
             " following contigs: %s",
             var_keep_contigs,
         )
         var_filtered_mt = hl.filter_intervals(filtered_mt, var_keep_locus_intervals)
-        logger.info("var_filtered_mt creation")
+        logging.info("var_filtered_mt creation")
         var_filtered_mt.show()
         var_filtered_mt.write(
             tmp_prefix
@@ -704,7 +704,7 @@ def annotate_sex(
         )
 
         if is_vds:
-            logger.info(
+            logging.info(
                 "creating var_ploidy_ht (imputing sex chromosome ploidy). var_ploidy_ht"
                 " becomes ploidy_ht"
             )
@@ -714,7 +714,7 @@ def annotate_sex(
                 normalization_contig=normalization_contig,
                 use_variant_dataset=True,
             )
-            logger.info("showing var_ploidy_before renaming columns")
+            logging.info("showing var_ploidy_before renaming columns")
             var_ploidy_ht.show()
             var_ploidy_ht = var_ploidy_ht.rename(
                 {
@@ -725,7 +725,7 @@ def annotate_sex(
                     "y_mean_dp": "chrY_mean_dp",
                 }
             )
-            logger.info("showing var_ploidy_ht after renaming columns")
+            logging.info("showing var_ploidy_ht after renaming columns")
             var_ploidy_ht.show()
             var_ploidy_ht.write(
                 tmp_prefix
@@ -754,7 +754,7 @@ def annotate_sex(
             ploidy_ht = var_ploidy_ht.annotate(**ploidy_ht[var_ploidy_ht.key])
         else:
             ploidy_ht = var_ploidy_ht
-    logger.info("ploidy_ht before annotating global")
+    logging.info("ploidy_ht before annotating global")
     ploidy_ht.show()
     ploidy_ht.write(
         tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_ploidy.ht",
@@ -770,7 +770,7 @@ def annotate_sex(
         ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
 
     if compute_x_frac_variants_hom_alt:
-        logger.info(
+        logging.info(
             "Computing fraction of variants that are homozygous alternate on"
             " chromosome X"
         )
@@ -802,7 +802,7 @@ def annotate_sex(
                 ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
 
     if compute_fstat:
-        logger.info("Filtering mt to biallelic SNPs in X contigs: %s", x_contigs)
+        logging.info("Filtering mt to biallelic SNPs in X contigs: %s", x_contigs)
         # if (path := checkpoint_path(tmp_prefix, "compute_fstat.ht")) and can_reuse(path, overwrite):
         #     ploidy_ht = hl.read_table(path)
         # else:
@@ -814,10 +814,10 @@ def annotate_sex(
             mt = mt.filter_rows(
                 (hl.len(mt.alleles) == 2) & hl.is_snp(mt.alleles[0], mt.alleles[1])
             )
-        logger.info("mt before filtering to biallelic SNPs in X contigs")
+        logging.info("mt before filtering to biallelic SNPs in X contigs")
         mt.show()
         mt = hl.filter_intervals(mt, x_locus_intervals)
-        logger.info("mt after filtering to biallelic SNPs in X contigs")
+        logging.info("mt after filtering to biallelic SNPs in X contigs")
         mt.show()
         if sites_ht is not None:
             if aaf_expr is None:
@@ -826,11 +826,11 @@ def annotate_sex(
                     " field with alternate allele frequency is 'AF'."
                 )
                 aaf_expr = "AF"
-            logger.info("Filtering to provided sites")
+            logging.info("Filtering to provided sites")
             mt = mt.annotate_rows(**sites_ht[mt.row_key])
             mt = mt.filter_rows(hl.is_defined(mt[aaf_expr]))
 
-        logger.info("Calculating inbreeding coefficient on chrX")
+        logging.info("Calculating inbreeding coefficient on chrX")
         sex_ht = hl.impute_sex(
             mt[gt_expr],
             aaf_threshold=aaf_threshold,
@@ -838,39 +838,39 @@ def annotate_sex(
             female_threshold=f_stat_cutoff,
             aaf=aaf_expr,
         )
-        logger.info("sex_ht creation")
+        logging.info("sex_ht creation")
         sex_ht.show()
         sex_ht.write(
             tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_sex_ht.ht",
             overwrite=True,
         )
 
-        logger.info("Annotating sex chromosome ploidy HT with impute_sex HT")
+        logging.info("Annotating sex chromosome ploidy HT with impute_sex HT")
         ploidy_ht = ploidy_ht.annotate(**sex_ht[ploidy_ht.key])
         ploidy_ht = ploidy_ht.annotate_globals(f_stat_cutoff=f_stat_cutoff)
         if path:
             ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
-        logger.info("ploidy_ht after annotation and checkpointing")
+        logging.info("ploidy_ht after annotation and checkpointing")
         ploidy_ht.show()
 
     if infer_karyotype:
-        logger.info("infer_karyotype")
+        logging.info("infer_karyotype")
         # if (path := checkpoint_path(tmp_prefix, "infer_karyotype.ht")) and can_reuse(path, overwrite):
         #     ploidy_ht = hl.read_table(path)
         # else:
         karyotype_ht = infer_sex_karyotype(
             ploidy_ht, f_stat_cutoff, use_gaussian_mixture_model
         )
-        logger.info("ploidy_ht before annotation with karyotype_ht")
+        logging.info("ploidy_ht before annotation with karyotype_ht")
         ploidy_ht.show()
         ploidy_ht = ploidy_ht.annotate(**karyotype_ht[ploidy_ht.key])
         ploidy_ht.show()
-        logger.info(
+        logging.info(
             "ploidy_ht after annotation with karyotype_ht but before annotation with"
             " globals"
         )
         ploidy_ht = ploidy_ht.annotate_globals(**karyotype_ht.index_globals())
-        logger.info(
+        logging.info(
             "ploidy_ht after annotation with karyotype_ht and after annotation with"
             " globals"
         )
