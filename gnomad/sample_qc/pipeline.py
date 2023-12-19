@@ -510,7 +510,7 @@ def annotate_sex(
     :return: Table of samples and their imputed sex karyotypes.
     """
     logging.info("Imputing sex chromosome ploidies...")
-
+    logging.info(f"Here is tmp_prefix: {tmp_prefix}")
     if infer_karyotype and not (compute_fstat or use_gaussian_mixture_model):
         raise ValueError(
             "In order to infer sex karyotype (infer_karyotype=True), one of"
@@ -536,9 +536,12 @@ def annotate_sex(
                 "Imputing sex ploidy does not exist yet for dense data."
             )
         mt = mtds
+    mt_tmp_outpath = str(
+        tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_something.mt"
+    )
     mt.show()
     mt.write(
-        tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_something.mt",
+        mt_tmp_outpath,
         overwrite=True,
     )
     # Determine the contigs that are needed for variant only and reference
@@ -610,12 +613,16 @@ def annotate_sex(
                     use_variant_dataset=False,
                 )
                 logging.info("ploidy_ht.ht creation (before renaming sex labels)")
-                ploidy_ht.show()
-                ploidy_ht.write(
+                ploidy_ht_tmp_outpath = str(
                     tmp_prefix
                     / "sample_qc2"
                     / "annotation"
-                    / "annotate_sex_ploidy_ht.ht",
+                    / "annotate_sex_ploidy_ht_ht.ht",
+                )
+                logging.info(f"ploidy_ht.ht path: {ploidy_ht_tmp_outpath}")
+                ploidy_ht.show()
+                ploidy_ht.write(
+                    ploidy_ht_tmp_outpath,
                     overwrite=True,
                 )
             ploidy_ht = ploidy_ht.rename(
@@ -627,9 +634,10 @@ def annotate_sex(
                 }
             )
             logging.info("ploidy_ht.ht after being written (after renaming sex labels)")
+            logging.info(f"ploidy_ht.ht path: {ploidy_ht_tmp_outpath}")
             ploidy_ht.show()
             ploidy_ht.write(
-                tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_ploidy_ht.ht",
+                ploidy_ht_tmp_outpath,
                 overwrite=True,
             )
         else:
@@ -645,9 +653,10 @@ def annotate_sex(
         if variants_only_y_ploidy:
             ploidy_ht = ploidy_ht.drop("chrY_ploidy", "chrY_mean_dp")
     logging.info("Checkpoint after creating ploidy_ht.ht")
+    logging.info(f"ploidy_ht.ht path: {ploidy_ht_tmp_outpath}")
     ploidy_ht.show()
     ploidy_ht.checkpoint(
-        tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_ploidy_ht.ht",
+        ploidy_ht_tmp_outpath,
         overwrite=True,
     )
     add_globals = hl.struct()
@@ -694,12 +703,13 @@ def annotate_sex(
         )
         var_filtered_mt = hl.filter_intervals(filtered_mt, var_keep_locus_intervals)
         logging.info("var_filtered_mt creation")
+        var_filtered_mt_tmp_outpath = str(
+            tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_var_filtered_mt.mt"
+        )
+        logging.info(f"var_filtered_mt path: {var_filtered_mt_tmp_outpath}")
         var_filtered_mt.show()
         var_filtered_mt.write(
-            tmp_prefix
-            / "sample_qc2"
-            / "annotation"
-            / "annotate_sex_var_filtered_mt.mt",
+            var_filtered_mt_tmp_outpath,
             overwrite=True,
         )
 
@@ -715,6 +725,13 @@ def annotate_sex(
                 use_variant_dataset=True,
             )
             logging.info("showing var_ploidy_before renaming columns")
+            var_ploidy_ht_tmp_outpath = str(
+                tmp_prefix
+                / "sample_qc"
+                / "annotation"
+                / "annotate_sex_var_ploidy_ht.ht"
+            )
+            logging.info(f"var_ploidy_ht path: {var_ploidy_ht_tmp_outpath}")
             var_ploidy_ht.show()
             var_ploidy_ht = var_ploidy_ht.rename(
                 {
@@ -726,12 +743,10 @@ def annotate_sex(
                 }
             )
             logging.info("showing var_ploidy_ht after renaming columns")
+            logging.info(f"var_ploidy_ht path: {var_ploidy_ht_tmp_outpath}")
             var_ploidy_ht.show()
             var_ploidy_ht.write(
-                tmp_prefix
-                / "sample_qc"
-                / "annotation"
-                / "annotate_sex_var_ploidy_ht.ht",
+                var_ploidy_ht_tmp_outpath,
                 overwrite=True,
             )
         else:
@@ -755,9 +770,10 @@ def annotate_sex(
         else:
             ploidy_ht = var_ploidy_ht
     logging.info("ploidy_ht before annotating global")
+    logging.info(f"ploidy_ht path: {ploidy_ht_tmp_outpath}")
     ploidy_ht.show()
     ploidy_ht.write(
-        tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_ploidy.ht",
+        ploidy_ht_tmp_outpath,
         overwrite=True,
     )
     ploidy_ht = ploidy_ht.annotate_globals(
@@ -767,7 +783,9 @@ def annotate_sex(
         **add_globals,
     )
     if path:
-        ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
+        logging.info("ploidy_ht before annotating global")
+        logging.info(f"ploidy_ht path: {ploidy_ht_tmp_outpath}")
+        ploidy_ht = ploidy_ht.checkpoint(ploidy_ht_tmp_outpath, overwrite=True)
 
     if compute_x_frac_variants_hom_alt:
         logging.info(
@@ -815,9 +833,11 @@ def annotate_sex(
                 (hl.len(mt.alleles) == 2) & hl.is_snp(mt.alleles[0], mt.alleles[1])
             )
         logging.info("mt before filtering to biallelic SNPs in X contigs")
+        logging.info(f"mt path: {mt_tmp_outpath}")
         mt.show()
         mt = hl.filter_intervals(mt, x_locus_intervals)
         logging.info("mt after filtering to biallelic SNPs in X contigs")
+        logging.info(f"mt path: {mt_tmp_outpath}")
         mt.show()
         if sites_ht is not None:
             if aaf_expr is None:
@@ -839,9 +859,12 @@ def annotate_sex(
             aaf=aaf_expr,
         )
         logging.info("sex_ht creation")
+        sex_ht_tmp_outpath = str(
+            tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_sex_ht.ht"
+        )
         sex_ht.show()
         sex_ht.write(
-            tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_sex_ht.ht",
+            sex_ht_tmp_outpath,
             overwrite=True,
         )
 
@@ -851,6 +874,7 @@ def annotate_sex(
         if path:
             ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
         logging.info("ploidy_ht after annotation and checkpointing")
+        logging.info(f"ploidy_ht path: {ploidy_ht_tmp_outpath}")
         ploidy_ht.show()
 
     if infer_karyotype:
@@ -861,14 +885,17 @@ def annotate_sex(
         karyotype_ht = infer_sex_karyotype(
             ploidy_ht, f_stat_cutoff, use_gaussian_mixture_model
         )
-        logging.info("ploidy_ht before annotation with karyotype_ht")
+        logging.info("karyotype_ht creation, printing karyotype_ht")
+        karyotype_ht.show()
+        logging.info("ploidy_ht before annotation with karyotype_ht:")
         ploidy_ht.show()
         ploidy_ht = ploidy_ht.annotate(**karyotype_ht[ploidy_ht.key])
-        ploidy_ht.show()
         logging.info(
             "ploidy_ht after annotation with karyotype_ht but before annotation with"
-            " globals"
+            " globals:"
         )
+        ploidy_ht.show()
+
         ploidy_ht = ploidy_ht.annotate_globals(**karyotype_ht.index_globals())
         logging.info(
             "ploidy_ht after annotation with karyotype_ht and after annotation with"
