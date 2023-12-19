@@ -588,6 +588,12 @@ def annotate_sex(
     # if (path := checkpoint_path(tmp_prefix, "ploidy.ht")) and can_reuse(path, overwrite):
     #     ploidy_ht = hl.read_table(path)
     # else:
+    ploidy_ht_tmp_outpath = os.path.join(
+        tmp_prefix,
+        "sample_qc2",
+        "annotation",
+        "annotate_sex_ploidy_ht_ht.ht",
+    )
     if ref_keep_contigs:
         logging.info(
             "Imputing sex chromosome ploidy using only reference block depth"
