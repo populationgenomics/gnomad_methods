@@ -536,8 +536,8 @@ def annotate_sex(
                 "Imputing sex ploidy does not exist yet for dense data."
             )
         mt = mtds
-    mt_tmp_outpath = str(
-        tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_something.mt"
+    mt_tmp_outpath = os.path.join(
+        tmp_prefix, "sample_qc2", "annotation", "annotate_sex_something.mt"
     )
     mt.show()
     mt.write(
@@ -613,11 +613,11 @@ def annotate_sex(
                     use_variant_dataset=False,
                 )
                 logging.info("ploidy_ht.ht creation (before renaming sex labels)")
-                ploidy_ht_tmp_outpath = str(
-                    tmp_prefix
-                    / "sample_qc2"
-                    / "annotation"
-                    / "annotate_sex_ploidy_ht_ht.ht",
+                ploidy_ht_tmp_outpath = os.path.join(
+                    tmp_prefix,
+                    "sample_qc2",
+                    "annotation",
+                    "annotate_sex_ploidy_ht_ht.ht",
                 )
                 logging.info(f"ploidy_ht.ht path: {ploidy_ht_tmp_outpath}")
                 ploidy_ht.show()
@@ -703,8 +703,8 @@ def annotate_sex(
         )
         var_filtered_mt = hl.filter_intervals(filtered_mt, var_keep_locus_intervals)
         logging.info("var_filtered_mt creation")
-        var_filtered_mt_tmp_outpath = str(
-            tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_var_filtered_mt.mt"
+        var_filtered_mt_tmp_outpath = os.path.join(
+            tmp_prefix, "sample_qc2", "annotation", "annotate_sex_var_filtered_mt.mt"
         )
         logging.info(f"var_filtered_mt path: {var_filtered_mt_tmp_outpath}")
         var_filtered_mt.show()
@@ -725,11 +725,8 @@ def annotate_sex(
                 use_variant_dataset=True,
             )
             logging.info("showing var_ploidy_before renaming columns")
-            var_ploidy_ht_tmp_outpath = str(
-                tmp_prefix
-                / "sample_qc"
-                / "annotation"
-                / "annotate_sex_var_ploidy_ht.ht"
+            var_ploidy_ht_tmp_outpath = os.path.join(
+                tmp_prefix, "sample_qc", "annotation", "annotate_sex_var_ploidy_ht.ht"
             )
             logging.info(f"var_ploidy_ht path: {var_ploidy_ht_tmp_outpath}")
             var_ploidy_ht.show()
@@ -859,8 +856,8 @@ def annotate_sex(
             aaf=aaf_expr,
         )
         logging.info("sex_ht creation")
-        sex_ht_tmp_outpath = str(
-            tmp_prefix / "sample_qc2" / "annotation" / "annotate_sex_sex_ht.ht"
+        sex_ht_tmp_outpath = os.path.join(
+            tmp_prefix, "sample_qc2", "annotation", "annotate_sex_sex_ht.ht"
         )
         sex_ht.show()
         sex_ht.write(
@@ -903,6 +900,6 @@ def annotate_sex(
         )
         ploidy_ht.show()
         if path:
-            ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
+            ploidy_ht = ploidy_ht.checkpoint(ploidy_ht_tmp_outpath, overwrite=True)
 
     return ploidy_ht
