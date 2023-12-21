@@ -790,10 +790,10 @@ def annotate_sex(
         variants_only_y_ploidy=variants_only_y_ploidy,
         **add_globals,
     )
-    if path:
-        logging.info("ploidy_ht before annotating global")
-        logging.info(f"ploidy_ht path: {ploidy_ht_tmp_outpath}")
-        ploidy_ht = ploidy_ht.checkpoint(ploidy_ht_tmp_outpath, overwrite=True)
+    # if path:
+    logging.info("ploidy_ht before annotating global")
+    logging.info(f"ploidy_ht path: {ploidy_ht_tmp_outpath}")
+    ploidy_ht = ploidy_ht.checkpoint(ploidy_ht_tmp_outpath, overwrite=True)
 
     if compute_x_frac_variants_hom_alt:
         logging.info(
@@ -879,8 +879,8 @@ def annotate_sex(
         logging.info("Annotating sex chromosome ploidy HT with impute_sex HT")
         ploidy_ht = ploidy_ht.annotate(**sex_ht[ploidy_ht.key])
         ploidy_ht = ploidy_ht.annotate_globals(f_stat_cutoff=f_stat_cutoff)
-        if path:
-            ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
+        # if path:
+        ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
         logging.info("ploidy_ht after annotation and checkpointing")
         logging.info(f"ploidy_ht path: {ploidy_ht_tmp_outpath}")
         ploidy_ht.checkpoint(ploidy_ht_tmp_outpath, overwrite=True)
@@ -911,7 +911,7 @@ def annotate_sex(
             " globals"
         )
         ploidy_ht.show()
-        if path:
-            ploidy_ht = ploidy_ht.checkpoint(ploidy_ht_tmp_outpath, overwrite=True)
+        # if path:
+        ploidy_ht = ploidy_ht.checkpoint(ploidy_ht_tmp_outpath, overwrite=True)
 
     return ploidy_ht
