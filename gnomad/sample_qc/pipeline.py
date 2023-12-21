@@ -540,6 +540,13 @@ def annotate_sex(
         tmp_prefix, "sample_qc2", "annotation", "annotate_sex_something.mt"
     )
     logging.info(f"mt_tmp_outpath: {mt_tmp_outpath}")
+    logging.info(f"mt pre-checkpoint")
+    mt.show()
+    mt.checkpoint(
+        mt_tmp_outpath,
+        overwrite=True,
+    )
+    logging.info(f"mt post-checkpoint")
     mt.show()
     mt.checkpoint(
         mt_tmp_outpath,
