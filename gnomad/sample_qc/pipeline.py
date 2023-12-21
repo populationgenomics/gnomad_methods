@@ -887,7 +887,7 @@ def annotate_sex(
         ploidy_ht = ploidy_ht.annotate(**sex_ht[ploidy_ht.key])
         ploidy_ht = ploidy_ht.annotate_globals(f_stat_cutoff=f_stat_cutoff)
         # if path:
-        ploidy_ht = ploidy_ht.checkpoint(path, overwrite=True)
+        ploidy_ht = ploidy_ht.checkpoint(ploidy_ht_tmp_outpath, overwrite=True)
         logging.info("ploidy_ht after annotation and checkpointing")
         logging.info(f"ploidy_ht path: {ploidy_ht_tmp_outpath}")
         ploidy_ht.checkpoint(ploidy_ht_tmp_outpath, overwrite=True)
