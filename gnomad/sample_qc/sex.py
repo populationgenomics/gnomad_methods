@@ -220,6 +220,8 @@ def get_ploidy_cutoffs(
         raise ValueError("No samples are grouped as XY!")
     logger.info("XX stats: %s", sex_stats["XX"])
     logger.info("XY stats: %s", sex_stats["XY"])
+    logger.info("normal_ploidy_cutoff: %s", normal_ploidy_cutoff)
+    logger.info("aneuploidy_cutoff: %s", aneuploidy_cutoff)
 
     cutoffs = (
         (
