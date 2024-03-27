@@ -7,7 +7,6 @@ import os
 from typing import List, Optional, Union
 
 import hail as hl
-
 from gnomad.sample_qc.sex import (
     gaussian_mixture_model_karyotype_assignment,
     get_chr_x_hom_alt_cutoffs,
@@ -259,8 +258,8 @@ def infer_sex_karyotype(
     ploidy_ht: hl.Table,
     f_stat_cutoff: float = 0.5,
     use_gaussian_mixture_model: bool = False,
-    normal_ploidy_cutoff: int = 5,
-    aneuploidy_cutoff: int = 6,
+    normal_ploidy_cutoff: int = 2,
+    aneuploidy_cutoff: int = 3,
     chr_x_frac_hom_alt_expr: Optional[hl.expr.NumericExpression] = None,
     normal_chr_x_hom_alt_cutoff: int = 5,
 ) -> hl.Table:
@@ -558,7 +557,9 @@ def annotate_sex(
         for contig in x_contigs
     ]
 
-    if (path := checkpoint_path(tmp_prefix, "ploidy.ht")) and can_reuse(path, overwrite):
+    if (path := checkpoint_path(tmp_prefix, "ploidy.ht")) and can_reuse(
+        path, overwrite
+    ):
         ploidy_ht = hl.read_table(path)
     else:
         if ref_keep_contigs:
@@ -700,7 +701,9 @@ def annotate_sex(
             "Computing fraction of variants that are homozygous alternate on"
             " chromosome X"
         )
-        if (path := checkpoint_path(tmp_prefix, "compute_x_frac_variants_hom_alt.ht")) and can_reuse(path, overwrite):
+        if (
+            path := checkpoint_path(tmp_prefix, "compute_x_frac_variants_hom_alt.ht")
+        ) and can_reuse(path, overwrite):
             ploidy_ht = hl.read_table(path)
         else:
             filtered_mt = hl.filter_intervals(filtered_mt, x_locus_intervals)
@@ -727,7 +730,9 @@ def annotate_sex(
 
     if compute_fstat:
         logger.info("Filtering mt to biallelic SNPs in X contigs: %s", x_contigs)
-        if (path := checkpoint_path(tmp_prefix, "compute_fstat.ht")) and can_reuse(path, overwrite):
+        if (path := checkpoint_path(tmp_prefix, "compute_fstat.ht")) and can_reuse(
+            path, overwrite
+        ):
             ploidy_ht = hl.read_table(path)
         else:
             if "was_split" in list(mt.row):
@@ -768,7 +773,9 @@ def annotate_sex(
 
     if infer_karyotype:
         logger.info("infer_karyotype")
-        if (path := checkpoint_path(tmp_prefix, "infer_karyotype.ht")) and can_reuse(path, overwrite):
+        if (path := checkpoint_path(tmp_prefix, "infer_karyotype.ht")) and can_reuse(
+            path, overwrite
+        ):
             ploidy_ht = hl.read_table(path)
         else:
             karyotype_ht = infer_sex_karyotype(

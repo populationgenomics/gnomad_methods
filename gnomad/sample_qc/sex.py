@@ -160,8 +160,8 @@ def gaussian_mixture_model_karyotype_assignment(
 def get_ploidy_cutoffs(
     ht: hl.Table,
     f_stat_cutoff: float = None,
-    normal_ploidy_cutoff: int = 5,
-    aneuploidy_cutoff: int = 6,
+    normal_ploidy_cutoff: int = 2,
+    aneuploidy_cutoff: int = 3,
     group_by_expr: hl.expr.StringExpression = None,
 ) -> Tuple[Tuple[float, Tuple[float, float], float], Tuple[Tuple[float, float], float]]:
     """
