@@ -106,3 +106,5 @@ ENV/
 
 # tokens
 slack_creds.py
+
+.scannerwork/
