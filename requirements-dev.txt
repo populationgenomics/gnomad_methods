@@ -4,7 +4,7 @@
 #
 #    pip-compile requirements-dev.in
 #
-astroid==3.0.1
+astroid==4.0.4
     # via pylint
 autopep8==2.0.2
     # via -r requirements-dev.in
@@ -53,7 +53,7 @@ pycodestyle==2.11.1
     # via autopep8
 pydocstyle==6.3.0
     # via -r requirements-dev.in
-pylint==3.0.2
+pylint==4.0.9
     # via -r requirements-dev.in
 pytest==7.4.3
     # via -r requirements-dev.in
